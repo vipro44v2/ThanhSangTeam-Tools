@@ -1,0 +1,115 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model facebook_pages {
+  id                          String             @id
+  page_id                     String             @unique
+  page_name                   String
+  is_active                   Boolean            @default(true)
+  created_at                  DateTime           @default(now())
+  daily_post_limit            Int                @default(3)
+  page_access_token_encrypted String
+  token_status                TokenStatus        @default(active)
+  updated_at                  DateTime
+  page_media_usage            page_media_usage[]
+  post_jobs                   post_jobs[]
+}
+
+model media_assets {
+  id               String             @id
+  file_url         String
+  storage_key      String             @unique
+  file_name        String
+  mime_type        String
+  width            Int?
+  height           Int?
+  size_bytes       Int
+  tags             String[]
+  status           MediaStatus        @default(available)
+  expires_at       DateTime
+  created_at       DateTime           @default(now())
+  page_media_usage page_media_usage[]
+  post_jobs        post_jobs[]
+}
+
+model page_media_usage {
+  id               String         @id
+  facebook_page_id String
+  media_asset_id   String
+  post_job_id      String?
+  used_at          DateTime       @default(now())
+  facebook_pages   facebook_pages @relation(fields: [facebook_page_id], references: [id], onDelete: Cascade)
+  media_assets     media_assets   @relation(fields: [media_asset_id], references: [id], onDelete: Cascade)
+  post_jobs        post_jobs?     @relation(fields: [post_job_id], references: [id])
+
+  @@unique([facebook_page_id, media_asset_id])
+  @@index([facebook_page_id])
+  @@index([media_asset_id])
+  @@index([post_job_id])
+}
+
+model post_jobs {
+  id               String             @id
+  page_id          String
+  media_asset_id   String?
+  caption          String?
+  scheduled_at     DateTime
+  status           PostJobStatus      @default(pending)
+  error_message    String?
+  fb_post_id       String?
+  posted_at        DateTime?
+  created_at       DateTime           @default(now())
+  page_media_usage page_media_usage[]
+  media_assets     media_assets?      @relation(fields: [media_asset_id], references: [id])
+  facebook_pages   facebook_pages     @relation(fields: [page_id], references: [id], onDelete: Cascade)
+
+  @@index([media_asset_id])
+  @@index([page_id])
+  @@index([status, scheduled_at])
+}
+
+model settings {
+  id    String @id
+  key   String @unique
+  value Json
+}
+
+model users {
+  id            String   @id
+  email         String   @unique
+  password_hash String
+  role          UserRole @default(admin)
+  created_at    DateTime @default(now())
+}
+
+enum MediaStatus {
+  available
+  used
+  expired
+  deleted
+}
+
+enum PostJobStatus {
+  pending
+  processing
+  posted
+  failed
+  skipped
+}
+
+enum TokenStatus {
+  active
+  expired
+  error
+}
+
+enum UserRole {
+  admin
+  editor
+}
