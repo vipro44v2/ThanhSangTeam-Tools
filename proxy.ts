@@ -4,7 +4,7 @@ import { decrypt, encrypt } from "@/lib/session";
 const SESSION_DURATION_S = 8 * 60 * 60;
 const REFRESH_THRESHOLD_MS = 2 * 60 * 60 * 1000; // refresh if < 2 h remaining
 
-const protectedPrefixes = ["/dashboard", "/facebook-pages", "/api/facebook", "/posts", "/api/upload"];
+const protectedPrefixes = ["/dashboard", "/facebook-pages", "/api/facebook", "/posts", "/api/upload", "/media", "/api/media"];
 const publicRoutes = ["/login", "/"];
 
 export default async function proxy(req: NextRequest) {

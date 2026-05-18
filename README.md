@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Nurse Facebook Auto Poster
 
-## Getting Started
+MVP web app for managing an AI-generated image library used by Facebook Page posting workflows.
 
-First, run the development server:
+## Setup
 
-```bash
+```powershell
+npm install
+copy .env.example .env
+npx.cmd prisma migrate dev
+npx.cmd prisma generate
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Media Library
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The current MVP implements the image upload module:
 
-## Learn More
+- Batch upload for JPEG, PNG, and WebP images
+- Comma-separated tags such as `nurse meme, night shift`
+- Local file storage under `public/uploads/media`
+- Metadata saved in `media_assets`
+- Filters by tag and status
+- File name search
+- Tag suggestions from existing assets
+- Pagination for large libraries
+- Inline edit for tags and status
+- Manual delete that removes the local file and marks the asset as `deleted`
 
-To learn more about Next.js, take a look at the following resources:
+Media API routes:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `POST /api/media/upload`
+- `GET /api/media?page=1&limit=24&search=quote&tag=night%20shift&status=available`
+- `GET /api/media/tags`
+- `PATCH /api/media/:id`
+- `DELETE /api/media/:id`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Environment
 
-## Deploy on Vercel
+```env
+DATABASE_URL="postgresql://postgres:1234@localhost:5432/nurse-fb-auto-poster1?schema=public"
+MEDIA_RETENTION_DAYS=7
+MEDIA_MAX_FILE_SIZE_MB=10
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`MEDIA_RETENTION_DAYS` controls `media_assets.expires_at` for uploaded files.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`MEDIA_MAX_FILE_SIZE_MB` controls per-file upload validation.
+
+## Notes For The Team
+
+Uploaded files are intentionally ignored by Git through `/public/uploads`.
+
+The storage helper is isolated in `lib/media/local-storage.ts` so it can be replaced with Cloudflare R2, AWS S3, or Supabase Storage later without changing the API contract.
