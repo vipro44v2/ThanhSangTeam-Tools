@@ -15,11 +15,14 @@
 
 # next.js
 /.next/
+/.next-dev-*/
+/.next-local/
 /out/
 
 # production
 /build
 /generated
+/public/uploads
 
 # misc
 .DS_Store
