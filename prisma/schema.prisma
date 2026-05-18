@@ -9,6 +9,7 @@ datasource db {
 
 model facebook_pages {
   id                          String             @id
+  facebook_account_id         String?
   page_id                     String             @unique
   page_name                   String
   is_active                   Boolean            @default(true)
@@ -17,8 +18,22 @@ model facebook_pages {
   page_access_token_encrypted String
   token_status                TokenStatus        @default(active)
   updated_at                  DateTime
+  facebook_accounts           facebook_accounts? @relation(fields: [facebook_account_id], references: [id], onDelete: SetNull)
   page_media_usage            page_media_usage[]
   post_jobs                   post_jobs[]
+
+  @@index([facebook_account_id])
+}
+
+model facebook_accounts {
+  id                          String           @id
+  facebook_user_id            String           @unique
+  facebook_user_name          String
+  user_access_token_encrypted String
+  token_status                TokenStatus      @default(active)
+  connected_at                DateTime         @default(now())
+  updated_at                  DateTime
+  facebook_pages              facebook_pages[]
 }
 
 model media_assets {
