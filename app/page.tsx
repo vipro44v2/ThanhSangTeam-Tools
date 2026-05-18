@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type MediaAsset = {
   id: string;
@@ -29,6 +29,19 @@ type MediaPagination = {
   totalPages: number;
 };
 
+type MediaStats = {
+  total: number;
+  available: number;
+  used: number;
+  expiringSoon: number;
+  deleted: number;
+};
+
+type SelectedFilePreview = {
+  file: File;
+  previewUrl: string;
+};
+
 const STATUS_OPTIONS = ["all", "available", "used", "expired", "deleted"] as const;
 const EDITABLE_STATUS_OPTIONS = ["available", "used", "expired", "deleted"] as const;
 const PAGE_SIZE = 24;
@@ -43,7 +56,13 @@ export default function Home() {
   });
   const [knownTags, setKnownTags] = useState<string[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [selectedPreviews, setSelectedPreviews] = useState<SelectedFilePreview[]>([]);
+  const selectedPreviewsRef = useRef<SelectedFilePreview[]>([]);
+  const [activePreviewIndex, setActivePreviewIndex] = useState<number | null>(null);
   const [tags, setTags] = useState("");
+  const [fileTags, setFileTags] = useState<string[]>([]);
+  const [expiresInDays, setExpiresInDays] = useState("");
+  const [fileExpiresInDays, setFileExpiresInDays] = useState<string[]>([]);
   const [tagFilter, setTagFilter] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_OPTIONS)[number]>("all");
@@ -52,21 +71,22 @@ export default function Home() {
   const [isUploading, setIsUploading] = useState(false);
   const [message, setMessage] = useState("");
   const [errors, setErrors] = useState<UploadError[]>([]);
-  const [currentTime] = useState(() => Date.now());
-  const [deletedCount, setDeletedCount] = useState(0);
+  const [stats, setStats] = useState<MediaStats>({
+    total: 0,
+    available: 0,
+    used: 0,
+    expiringSoon: 0,
+    deleted: 0,
+  });
 
-  const stats = useMemo(() => {
-    return {
-      total: assets.length,
-      available: assets.filter((asset) => asset.status === "available").length,
-      deleted: deletedCount,
-      expiringSoon: assets.filter((asset) => {
-        const expiresAt = new Date(asset.expires_at).getTime();
-        const inTwoDays = currentTime + 2 * 24 * 60 * 60 * 1000;
-        return asset.status !== "deleted" && expiresAt <= inTwoDays;
-      }).length,
-    };
-  }, [assets, currentTime, deletedCount]);
+  const loadStats = useCallback(async () => {
+    const response = await fetch("/api/media/stats");
+    const data = await response.json();
+
+    if (response.ok) {
+      setStats(data.stats);
+    }
+  }, []);
 
   const loadAssets = useCallback(async () => {
     setIsLoading(true);
@@ -100,15 +120,8 @@ export default function Home() {
     setAssets(data.assets);
     setPagination(data.pagination);
     setIsLoading(false);
-
-    // Load deleted count whenever assets are loaded
-    const deletedResponse = await fetch("/api/media?status=deleted&limit=1");
-    const deletedData = await deletedResponse.json();
-
-    if (deletedResponse.ok) {
-      setDeletedCount(deletedData.pagination.total);
-    }
-  }, [page, search, tagFilter, statusFilter]);
+    await loadStats();
+  }, [loadStats, page, search, tagFilter, statusFilter]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -117,8 +130,35 @@ export default function Home() {
 
   useEffect(() => {
     void loadTags();
-    void loadDeletedCount();
   }, []);
+
+  useEffect(() => {
+    selectedPreviewsRef.current = selectedPreviews;
+  }, [selectedPreviews]);
+
+  useEffect(() => {
+    return () => revokePreviewUrls(selectedPreviewsRef.current);
+  }, []);
+
+  const activePreview = activePreviewIndex === null ? null : selectedPreviews[activePreviewIndex] ?? null;
+
+  useEffect(() => {
+    if (!activePreview) {
+      return;
+    }
+
+    function handlePreviewKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setActivePreviewIndex(null);
+      }
+    }
+
+    document.addEventListener("keydown", handlePreviewKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handlePreviewKeyDown);
+    };
+  }, [activePreview]);
 
   function resetToFirstPage() {
     setPage(1);
@@ -133,19 +173,65 @@ export default function Home() {
     }
   }
 
-  async function loadDeletedCount() {
-    const response = await fetch("/api/media?status=deleted&limit=1");
-    const data = await response.json();
-
-    if (response.ok) {
-      setDeletedCount(data.pagination.total);
-    }
-  }
-
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    setSelectedFiles(Array.from(event.target.files ?? []));
+    const files = Array.from(event.target.files ?? []);
+
+    revokePreviewUrls(selectedPreviewsRef.current);
+    setSelectedFiles(files);
+    setSelectedPreviews(files.map((file) => ({
+      file,
+      previewUrl: URL.createObjectURL(file),
+    })));
+    setActivePreviewIndex(null);
+    setFileTags(files.map(() => ""));
+    setFileExpiresInDays(files.map(() => ""));
     setMessage("");
     setErrors([]);
+  }
+
+  function updateFileTags(index: number, value: string) {
+    setFileTags((currentFileTags) => currentFileTags.map((currentValue, currentIndex) => {
+      return currentIndex === index ? value : currentValue;
+    }));
+  }
+
+  function applyTagsToAllFiles() {
+    setFileTags(selectedFiles.map(() => tags));
+    setFileExpiresInDays(selectedFiles.map(() => expiresInDays));
+  }
+
+  function updateFileExpiresInDays(index: number, value: string) {
+    setFileExpiresInDays((currentFileExpiresInDays) => currentFileExpiresInDays.map((currentValue, currentIndex) => {
+      return currentIndex === index ? value : currentValue;
+    }));
+  }
+
+  function removeSelectedFile(index: number) {
+    const preview = selectedPreviews[index];
+
+    if (preview) {
+      URL.revokeObjectURL(preview.previewUrl);
+    }
+
+    setSelectedFiles((currentFiles) => currentFiles.filter((_, currentIndex) => currentIndex !== index));
+    setSelectedPreviews((currentPreviews) => currentPreviews.filter((_, currentIndex) => currentIndex !== index));
+    setFileTags((currentFileTags) => currentFileTags.filter((_, currentIndex) => currentIndex !== index));
+    setFileExpiresInDays((currentFileExpiresInDays) => currentFileExpiresInDays.filter((_, currentIndex) => currentIndex !== index));
+    setActivePreviewIndex((currentIndex) => {
+      if (currentIndex === null) {
+        return null;
+      }
+
+      if (currentIndex === index) {
+        return null;
+      }
+
+      if (currentIndex > index) {
+        return currentIndex - 1;
+      }
+
+      return currentIndex;
+    });
   }
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
@@ -162,6 +248,9 @@ export default function Home() {
 
     const formData = new FormData();
     formData.set("tags", tags);
+    formData.set("expiresInDays", expiresInDays);
+    formData.set("fileTags", JSON.stringify(fileTags));
+    formData.set("fileExpiresInDays", JSON.stringify(fileExpiresInDays));
 
     for (const file of selectedFiles) {
       formData.append("files", file);
@@ -183,10 +272,14 @@ export default function Home() {
 
     setMessage(`Uploaded ${data.created.length} image${data.created.length === 1 ? "" : "s"}.`);
     setErrors(data.errors ?? []);
+    revokePreviewUrls(selectedPreviewsRef.current);
     setSelectedFiles([]);
+    setSelectedPreviews([]);
+    setActivePreviewIndex(null);
+    setFileTags([]);
+    setFileExpiresInDays([]);
     await loadTags();
     await loadAssets();
-    await loadDeletedCount();
   }
 
   async function handleDelete(asset: MediaAsset) {
@@ -202,10 +295,12 @@ export default function Home() {
 
     setMessage(`Deleted ${asset.file_name}.`);
     await loadAssets();
-    await loadDeletedCount();
   }
 
-  async function handleUpdate(asset: MediaAsset, updates: { tags: string; status: MediaAsset["status"] }) {
+  async function handleUpdate(
+    asset: MediaAsset,
+    updates: { expires_at: string; tags: string; status: MediaAsset["status"] },
+  ) {
     const response = await fetch(`/api/media/${asset.id}`, {
       method: "PATCH",
       headers: {
@@ -223,7 +318,6 @@ export default function Home() {
     setMessage(`Updated ${asset.file_name}.`);
     await loadTags();
     await loadAssets();
-    await loadDeletedCount();
   }
 
   return (
@@ -237,9 +331,10 @@ export default function Home() {
               Upload AI-generated nurse images, tag them by topic, and keep the asset pool ready for scheduling.
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
             <StatCard label="Total" value={stats.total} />
             <StatCard label="Available" value={stats.available} />
+            <StatCard label="Used" value={stats.used} />
             <StatCard label="Expiring" value={stats.expiringSoon} />
             <StatCard label="Deleted" value={stats.deleted} />
           </div>
@@ -264,21 +359,8 @@ export default function Home() {
               />
             </label>
 
-            {selectedFiles.length > 0 ? (
-              <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-700">
-                <p className="font-medium">{selectedFiles.length} file(s) selected</p>
-                <ul className="mt-2 space-y-1">
-                  {selectedFiles.slice(0, 5).map((file) => (
-                    <li key={`${file.name}-${file.size}`} className="truncate">
-                      {file.name}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-
             <label className="flex flex-col gap-2 text-sm font-medium text-slate-700">
-              Tags
+              Tags for all images
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 placeholder="nurse meme, night shift, nursing student"
@@ -287,6 +369,95 @@ export default function Home() {
                 onChange={(event) => setTags(event.target.value)}
               />
             </label>
+
+            <label className="flex flex-col gap-2 text-sm font-medium text-slate-700">
+              Expiry days for all images
+              <input
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                min="1"
+                placeholder="Default 7 days"
+                step="1"
+                type="number"
+                value={expiresInDays}
+                onChange={(event) => setExpiresInDays(event.target.value)}
+              />
+            </label>
+
+            {selectedPreviews.length > 0 ? (
+              <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-slate-800">
+                    {selectedPreviews.length} image{selectedPreviews.length === 1 ? "" : "s"} selected
+                  </p>
+                  <button
+                    type="button"
+                    onClick={applyTagsToAllFiles}
+                    className="rounded-md border border-teal-200 bg-white px-3 py-1.5 text-xs font-semibold text-teal-800 transition hover:bg-teal-50"
+                  >
+                    Apply to all
+                  </button>
+                </div>
+                <div className="grid max-h-[420px] gap-2 overflow-y-auto pr-1">
+                  {selectedPreviews.map((preview, index) => (
+                    <div
+                      key={`${preview.file.name}-${preview.file.size}-${index}`}
+                      className="grid grid-cols-[64px_1fr] gap-3 rounded-md border border-slate-200 bg-white p-2"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setActivePreviewIndex(index)}
+                        className="size-16 overflow-hidden rounded-md bg-slate-100 ring-1 ring-slate-200 transition hover:ring-2 hover:ring-teal-400 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={preview.previewUrl}
+                          alt={preview.file.name}
+                          className="h-full w-full object-cover"
+                        />
+                      </button>
+                      <div className="grid min-w-0 gap-2">
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold text-slate-800">{preview.file.name}</p>
+                            <p className="text-xs text-slate-500">{formatBytes(preview.file.size)}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeSelectedFile(index)}
+                            className="grid size-6 shrink-0 place-items-center rounded-full border border-slate-200 text-sm leading-none text-slate-500 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                            aria-label={`Remove ${preview.file.name}`}
+                          >
+                            x
+                          </button>
+                        </div>
+                        <label className="grid gap-1 text-xs font-medium text-slate-600">
+                          Tags
+                          <input
+                            className="min-w-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                            placeholder="Leave blank to use tags for all images"
+                            value={fileTags[index] ?? ""}
+                            list="media-tag-suggestions"
+                            onChange={(event) => updateFileTags(index, event.target.value)}
+                          />
+                        </label>
+                        <label className="grid gap-1 text-xs font-medium text-slate-600">
+                          Expiry days
+                          <input
+                            className="min-w-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                            min="1"
+                            placeholder="Default 7 days"
+                            step="1"
+                            type="number"
+                            value={fileExpiresInDays[index] ?? ""}
+                            onChange={(event) => updateFileExpiresInDays(index, event.target.value)}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <button
               type="submit"
@@ -405,6 +576,44 @@ export default function Home() {
           <option key={tag} value={tag} />
         ))}
       </datalist>
+
+      {activePreview ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Preview ${activePreview.file.name}`}
+          onClick={() => setActivePreviewIndex(null)}
+        >
+          <div
+            className="relative flex max-h-[90vh] w-full max-w-5xl flex-col gap-3"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 text-white">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{activePreview.file.name}</p>
+                <p className="text-xs text-slate-200">{formatBytes(activePreview.file.size)}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActivePreviewIndex(null)}
+                className="grid size-10 place-items-center rounded-full bg-white/10 text-2xl leading-none text-white ring-1 ring-white/20 transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-teal-300"
+                aria-label="Close preview"
+              >
+                x
+              </button>
+            </div>
+            <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-lg bg-black">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={activePreview.previewUrl}
+                alt={activePreview.file.name}
+                className="max-h-[82vh] w-auto max-w-full object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -425,13 +634,18 @@ function MediaCard({
 }: {
   asset: MediaAsset;
   onDelete: (asset: MediaAsset) => void;
-  onUpdate: (asset: MediaAsset, updates: { tags: string; status: MediaAsset["status"] }) => void;
+  onUpdate: (
+    asset: MediaAsset,
+    updates: { expires_at: string; tags: string; status: MediaAsset["status"] },
+  ) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [draftExpiresAt, setDraftExpiresAt] = useState(formatDateInputValue(asset.expires_at));
   const [draftTags, setDraftTags] = useState(asset.tags.join(", "));
   const [draftStatus, setDraftStatus] = useState<MediaAsset["status"]>(asset.status);
 
   function cancelEdit() {
+    setDraftExpiresAt(formatDateInputValue(asset.expires_at));
     setDraftTags(asset.tags.join(", "));
     setDraftStatus(asset.status);
     setIsEditing(false);
@@ -439,6 +653,7 @@ function MediaCard({
 
   async function saveEdit() {
     await onUpdate(asset, {
+      expires_at: draftExpiresAt,
       tags: draftTags,
       status: draftStatus,
     });
@@ -473,6 +688,16 @@ function MediaCard({
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 value={draftTags}
                 onChange={(event) => setDraftTags(event.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-slate-600">
+              Expires
+              <input
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                type="date"
+                required
+                value={draftExpiresAt}
+                onChange={(event) => setDraftExpiresAt(event.target.value)}
               />
             </label>
             <label className="grid gap-1 text-xs font-medium text-slate-600">
@@ -591,6 +816,12 @@ function PaginationControls({
   );
 }
 
+function revokePreviewUrls(previews: SelectedFilePreview[]) {
+  for (const preview of previews) {
+    URL.revokeObjectURL(preview.previewUrl);
+  }
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) {
     return `${Math.round(bytes / 1024)} KB`;
@@ -605,6 +836,10 @@ function formatDate(value: string) {
     month: "short",
     day: "2-digit",
   }).format(new Date(value));
+}
+
+function formatDateInputValue(value: string) {
+  return new Date(value).toISOString().slice(0, 10);
 }
 
 function statusClassName(status: MediaAsset["status"]) {

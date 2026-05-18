@@ -8,7 +8,12 @@ import { MediaListParams, parseMediaStatus } from "@/lib/media/query";
 import {
   createExpiryDate,
   getMediaUploadConfig,
+  isMediaAssetExpiringSoon,
+  parseExpiryDateInput,
+  parseRetentionDaysInput,
   parseTags,
+  resolveUploadRetentionDays,
+  resolveUploadTags,
   validateMediaFile,
 } from "@/lib/media/validation";
 
@@ -17,7 +22,9 @@ export type MediaUploadResult = {
   errors: { fileName: string; error: string }[];
 };
 
-export async function createMediaAsset(file: File, rawTags: string) {
+const EXPIRING_SOON_DAYS = 2;
+
+export async function createMediaAsset(file: File, rawTags: string, rawRetentionDays?: string) {
   const config = getMediaUploadConfig();
   const validation = validateMediaFile(file, config);
 
@@ -28,6 +35,8 @@ export async function createMediaAsset(file: File, rawTags: string) {
   const createdAt = new Date();
   const storedFile = await saveMediaFile(file);
   const dimensions = readImageDimensions(storedFile.buffer, file.type);
+  const retentionDays = rawRetentionDays ? parseRetentionDaysInput(rawRetentionDays) : config.retentionDays;
+  const expiresAt = createExpiryDate(createdAt, retentionDays);
 
   return prisma.media_assets.create({
     data: {
@@ -41,19 +50,29 @@ export async function createMediaAsset(file: File, rawTags: string) {
       size_bytes: file.size,
       tags: parseTags(rawTags),
       status: MediaStatus.available,
-      expires_at: createExpiryDate(createdAt, config.retentionDays),
+      expires_at: expiresAt,
       created_at: createdAt,
     },
   });
 }
 
-export async function createMediaAssets(files: File[], rawTags: string): Promise<MediaUploadResult> {
+export async function createMediaAssets(
+  files: File[],
+  rawTags: string,
+  rawFileTags: string[] = [],
+  rawRetentionDays = "",
+  rawFileRetentionDays: string[] = [],
+): Promise<MediaUploadResult> {
   const created: MediaUploadResult["created"] = [];
   const errors: MediaUploadResult["errors"] = [];
 
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
     try {
-      created.push(await createMediaAsset(file, rawTags));
+      created.push(await createMediaAsset(
+        file,
+        resolveUploadTags(rawTags, rawFileTags, index),
+        resolveUploadRetentionDays(rawRetentionDays, rawFileRetentionDays, index),
+      ));
     } catch (error) {
       errors.push({
         fileName: file.name,
@@ -66,6 +85,8 @@ export async function createMediaAssets(files: File[], rawTags: string): Promise
 }
 
 export async function listMediaAssets(params: MediaListParams) {
+  await cleanupExpiredMediaAssets();
+
   const where = {
     ...(params.tag ? { tags: { has: params.tag } } : {}),
     ...(params.status
@@ -105,6 +126,8 @@ export async function listMediaAssets(params: MediaListParams) {
 }
 
 export async function listMediaTags() {
+  await cleanupExpiredMediaAssets();
+
   const assets = await prisma.media_assets.findMany({
     where: {
       status: {
@@ -127,17 +150,100 @@ export async function listMediaTags() {
   return Array.from(tags).sort((a, b) => a.localeCompare(b));
 }
 
+export async function getMediaStats() {
+  await cleanupExpiredMediaAssets();
+
+  const now = new Date();
+  const expiringWindowEnd = new Date(now);
+  expiringWindowEnd.setDate(expiringWindowEnd.getDate() + EXPIRING_SOON_DAYS);
+
+  const [total, available, used, deleted, expiringCandidates] = await Promise.all([
+    prisma.media_assets.count({
+      where: {
+        status: {
+          not: MediaStatus.deleted,
+        },
+      },
+    }),
+    prisma.media_assets.count({ where: { status: MediaStatus.available } }),
+    prisma.media_assets.count({ where: { status: MediaStatus.used } }),
+    prisma.media_assets.count({ where: { status: MediaStatus.deleted } }),
+    prisma.media_assets.findMany({
+      where: {
+        status: {
+          not: MediaStatus.deleted,
+        },
+        expires_at: {
+          gt: now,
+          lte: expiringWindowEnd,
+        },
+      },
+      select: {
+        expires_at: true,
+      },
+    }),
+  ]);
+
+  return {
+    total,
+    available,
+    used,
+    deleted,
+    expiringSoon: expiringCandidates.filter((asset) => {
+      return isMediaAssetExpiringSoon(asset.expires_at, now, expiringWindowEnd);
+    }).length,
+  };
+}
+
+export async function cleanupExpiredMediaAssets(now = new Date()) {
+  const expiredAssets = await prisma.media_assets.findMany({
+    where: {
+      expires_at: {
+        lte: now,
+      },
+    },
+    select: {
+      id: true,
+      storage_key: true,
+    },
+  });
+
+  if (expiredAssets.length === 0) {
+    return { deleted: 0 };
+  }
+
+  for (const asset of expiredAssets) {
+    await deleteMediaFile(asset.storage_key);
+  }
+
+  const result = await prisma.media_assets.deleteMany({
+    where: {
+      id: {
+        in: expiredAssets.map((asset) => asset.id),
+      },
+    },
+  });
+
+  return { deleted: result.count };
+}
+
 export async function updateMediaAsset(
   id: string,
   input: {
+    expires_at?: string;
     tags?: string;
     status?: string;
   },
 ) {
   const data: {
+    expires_at?: Date;
     tags?: string[];
     status?: MediaStatus;
   } = {};
+
+  if (input.expires_at !== undefined) {
+    data.expires_at = parseExpiryDateInput(input.expires_at);
+  }
 
   if (input.tags !== undefined) {
     data.tags = parseTags(input.tags);

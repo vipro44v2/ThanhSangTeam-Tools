@@ -37,6 +37,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
     const body = await request.json();
     const asset = await updateMediaAsset(id, {
+      expires_at: typeof body.expires_at === "string" ? body.expires_at : undefined,
       tags: typeof body.tags === "string" ? body.tags : undefined,
       status: typeof body.status === "string" ? body.status : undefined,
     });
