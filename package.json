@@ -6,6 +6,7 @@
     "dev": "node scripts/dev-server.mjs",
     "build": "next build",
     "start": "next start",
+    "worker": "node scripts/post-worker.mjs",
     "lint": "eslint",
     "test": "tsx --test \"tests/**/*.test.ts\""
   },
@@ -17,7 +18,8 @@
     "next": "16.2.6",
     "pg": "^8.20.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

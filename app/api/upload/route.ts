@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { writeFile, mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { requireAdminAccess } from "@/lib/security";
+import { saveMediaFile } from "@/lib/media/local-storage";
+
+export const runtime = "nodejs";
 
 const ALLOWED_TYPES = new Set([
   "image/jpeg",
@@ -33,16 +34,7 @@ export async function POST(req: NextRequest) {
   }
 
   const id = randomUUID();
-  const ext = file.name.split(".").pop()?.toLowerCase() ?? "bin";
-  const fileName = `${id}.${ext}`;
-  const storageKey = `uploads/${fileName}`;
-  const uploadDir = path.join(process.cwd(), "public", "uploads");
-
-  await mkdir(uploadDir, { recursive: true });
-  await writeFile(
-    path.join(uploadDir, fileName),
-    Buffer.from(await file.arrayBuffer()),
-  );
+  const storedFile = await saveMediaFile(file);
 
   const tagsRaw = form.get("tags") as string | null;
   const tags: string[] = tagsRaw ? (JSON.parse(tagsRaw) as string[]) : [];
@@ -54,8 +46,8 @@ export async function POST(req: NextRequest) {
   const asset = await prisma.media_assets.create({
     data: {
       id,
-      file_url: `/${storageKey}`,
-      storage_key: storageKey,
+      file_url: storedFile.fileUrl,
+      storage_key: storedFile.storageKey,
       file_name: file.name,
       mime_type: file.type,
       size_bytes: file.size,

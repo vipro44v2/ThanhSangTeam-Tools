@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ConfirmModal } from "@/app/components/confirm-modal";
 
 type MediaAsset = {
   id: string;
@@ -65,10 +66,14 @@ export default function MediaLibraryPage() {
   const [fileExpiresInDays, setFileExpiresInDays] = useState<string[]>([]);
   const [tagFilter, setTagFilter] = useState("");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [debouncedTagFilter, setDebouncedTagFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_OPTIONS)[number]>("all");
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<MediaAsset | null>(null);
   const [message, setMessage] = useState("");
   const [errors, setErrors] = useState<UploadError[]>([]);
   const [stats, setStats] = useState<MediaStats>({
@@ -88,13 +93,16 @@ export default function MediaLibraryPage() {
   const loadAssets = useCallback(async () => {
     setIsLoading(true);
     const params = new URLSearchParams();
-    if (tagFilter.trim()) params.set("tag", tagFilter.trim());
+    if (debouncedTagFilter.trim()) params.set("tag", debouncedTagFilter.trim());
     if (statusFilter !== "all") params.set("status", statusFilter);
-    if (search.trim()) params.set("search", search.trim());
+    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
     params.set("page", String(page));
     params.set("limit", String(PAGE_SIZE));
 
-    const response = await fetch(`/api/media?${params.toString()}`);
+    const [response] = await Promise.all([
+      fetch(`/api/media?${params.toString()}`),
+      loadStats(),
+    ]);
     const data = await response.json();
 
     if (!response.ok) {
@@ -105,13 +113,22 @@ export default function MediaLibraryPage() {
     setAssets(data.assets);
     setPagination(data.pagination);
     setIsLoading(false);
-    await loadStats();
-  }, [loadStats, page, search, tagFilter, statusFilter]);
+  }, [loadStats, page, debouncedSearch, debouncedTagFilter, statusFilter]);
 
   useEffect(() => { void loadAssets(); }, [loadAssets]);
   useEffect(() => { void loadTags(); }, []);
   useEffect(() => { selectedPreviewsRef.current = selectedPreviews; }, [selectedPreviews]);
   useEffect(() => { return () => revokePreviewUrls(selectedPreviewsRef.current); }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => { setDebouncedTagFilter(tagFilter); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [tagFilter]);
 
   const activePreview = activePreviewIndex === null ? null : selectedPreviews[activePreviewIndex] ?? null;
 
@@ -208,27 +225,88 @@ export default function MediaLibraryPage() {
   }
 
   async function handleDelete(asset: MediaAsset) {
+    const prevAssets = assets;
+    const prevStats = stats;
+    const prevPagination = pagination;
+
+    setAssets((cur) => cur.filter((a) => a.id !== asset.id));
+    setPagination((cur) => ({
+      ...cur,
+      total: Math.max(0, cur.total - 1),
+      totalPages: Math.max(1, Math.ceil((cur.total - 1) / PAGE_SIZE)),
+    }));
+    setStats((cur) => {
+      const next = { ...cur, total: Math.max(0, cur.total - 1) };
+      if (asset.status === "available") next.available = Math.max(0, next.available - 1);
+      else if (asset.status === "used") next.used = Math.max(0, next.used - 1);
+      else if (asset.status === "deleted") next.deleted = Math.max(0, next.deleted - 1);
+      return next;
+    });
+
     const response = await fetch(`/api/media/${asset.id}`, { method: "DELETE" });
     const data = await response.json();
-    if (!response.ok) { setMessage(data.error ?? "Delete failed."); return; }
+    if (!response.ok) {
+      setAssets(prevAssets);
+      setPagination(prevPagination);
+      setStats(prevStats);
+      setMessage(data.error ?? "Delete failed.");
+      return;
+    }
     setMessage(`Deleted ${asset.file_name}.`);
-    await loadAssets();
+  }
+
+  async function handleDeleteConfirm() {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    await handleDelete(deleteTarget);
+    setDeleteTarget(null);
+    setIsDeleting(false);
   }
 
   async function handleUpdate(
     asset: MediaAsset,
     updates: { expires_at: string; tags: string; status: MediaAsset["status"] },
   ) {
+    const prevAssets = assets;
+    const prevStats = stats;
+    const updatedTags = updates.tags.split(",").map((t) => t.trim()).filter(Boolean);
+
+    setAssets((cur) =>
+      cur.map((a) =>
+        a.id === asset.id
+          ? { ...a, tags: updatedTags, expires_at: new Date(updates.expires_at).toISOString(), status: updates.status }
+          : a,
+      ),
+    );
+    const newTags = updatedTags.filter((t) => !knownTags.includes(t));
+    if (newTags.length > 0) setKnownTags((cur) => [...new Set([...cur, ...newTags])]);
+    if (updates.status !== asset.status) {
+      setStats((cur) => {
+        const next = { ...cur };
+        if (asset.status === "available") next.available = Math.max(0, next.available - 1);
+        else if (asset.status === "used") next.used = Math.max(0, next.used - 1);
+        else if (asset.status === "deleted") next.deleted = Math.max(0, next.deleted - 1);
+        if (updates.status === "available") next.available++;
+        else if (updates.status === "used") next.used++;
+        else if (updates.status === "deleted") next.deleted++;
+        return next;
+      });
+    }
+
     const response = await fetch(`/api/media/${asset.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
     });
     const data = await response.json();
-    if (!response.ok) { setMessage(data.error ?? "Update failed."); return; }
+    if (!response.ok) {
+      setAssets(prevAssets);
+      setStats(prevStats);
+      setMessage(data.error ?? "Update failed.");
+      return;
+    }
     setMessage(`Updated ${asset.file_name}.`);
-    await loadTags();
-    await loadAssets();
+    void loadStats();
   }
 
   return (
@@ -357,13 +435,13 @@ export default function MediaLibraryPage() {
                 Search file name
                 <input className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                   placeholder="quote.png" value={search}
-                  onChange={(e) => { setSearch(e.target.value); resetToFirstPage(); }} />
+                  onChange={(e) => setSearch(e.target.value)} />
               </label>
               <label className="flex flex-1 flex-col gap-2 text-sm font-medium text-slate-700">
                 Filter by tag
                 <input className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                   placeholder="night shift" value={tagFilter} list="media-tag-suggestions"
-                  onChange={(e) => { setTagFilter(e.target.value); resetToFirstPage(); }} />
+                  onChange={(e) => setTagFilter(e.target.value)} />
               </label>
               <label className="flex flex-col gap-2 text-sm font-medium text-slate-700">
                 Status
@@ -377,7 +455,7 @@ export default function MediaLibraryPage() {
             {knownTags.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {knownTags.slice(0, 16).map((tag) => (
-                  <button key={tag} type="button" onClick={() => { setTagFilter(tag); resetToFirstPage(); }}
+                  <button key={tag} type="button" onClick={() => { setTagFilter(tag); setDebouncedTagFilter(tag); setPage(1); }}
                     className="rounded-full bg-white px-3 py-1 text-xs font-medium text-teal-800 ring-1 ring-teal-100 transition hover:bg-teal-50">
                     {tag}
                   </button>
@@ -392,7 +470,7 @@ export default function MediaLibraryPage() {
             ) : (
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {assets.map((asset) => (
-                  <MediaCard key={asset.id} asset={asset} onDelete={handleDelete} onUpdate={handleUpdate} />
+                  <MediaCard key={asset.id} asset={asset} onDelete={(a) => setDeleteTarget(a)} onUpdate={handleUpdate} />
                 ))}
               </div>
             )}
@@ -432,6 +510,20 @@ export default function MediaLibraryPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {deleteTarget && (
+        <ConfirmModal
+          title="Delete media asset?"
+          description={
+            <>
+              <span className="font-medium text-[#344054]">{deleteTarget.file_name}</span> will be permanently deleted. This cannot be undone.
+            </>
+          }
+          isPending={isDeleting}
+          onConfirm={handleDeleteConfirm}
+          onClose={() => setDeleteTarget(null)}
+        />
       )}
     </main>
   );

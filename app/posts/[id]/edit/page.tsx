@@ -23,14 +23,18 @@ export default async function EditPostPage({
       scheduled_at: true,
       status: true,
       facebook_pages: { select: { page_name: true, page_id: true } },
-      media_assets: {
-        select: { id: true, file_url: true, mime_type: true, file_name: true },
+      post_job_media: {
+        select: { media_assets: { select: { id: true, file_url: true, mime_type: true, file_name: true } } },
+        orderBy: { position: "asc" },
+        take: 1,
       },
     },
   });
 
   if (!job) notFound();
   if (job.status !== "pending") redirect("/posts");
+
+  const firstMedia = job.post_job_media[0]?.media_assets ?? null;
 
   return (
     <main className="min-h-screen bg-[#f7f8fb] text-[#111827]">
@@ -55,13 +59,8 @@ export default async function EditPostPage({
           initialCaption={job.caption ?? ""}
           initialScheduledAt={job.scheduled_at.toISOString()}
           initialMedia={
-            job.media_assets
-              ? {
-                  id: job.media_assets.id,
-                  url: job.media_assets.file_url,
-                  name: job.media_assets.file_name,
-                  mime_type: job.media_assets.mime_type,
-                }
+            firstMedia
+              ? { id: firstMedia.id, url: firstMedia.file_url, name: firstMedia.file_name, mime_type: firstMedia.mime_type }
               : null
           }
         />

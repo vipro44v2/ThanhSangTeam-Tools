@@ -14,6 +14,7 @@ function formatSchedule(iso: string) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short", day: "numeric", year: "numeric",
     hour: "2-digit", minute: "2-digit",
+    timeZone: "Asia/Bangkok",
   }).format(new Date(iso));
 }
 

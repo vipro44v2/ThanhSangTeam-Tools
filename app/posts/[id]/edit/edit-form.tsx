@@ -5,16 +5,24 @@ import { updatePostJob } from "./actions";
 
 type MediaAsset = { id: string; url: string; name: string; mime_type: string };
 
+const VN_MS = 7 * 60 * 60 * 1000;
+
+function toVnLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return [d.getUTCFullYear(), pad(d.getUTCMonth() + 1), pad(d.getUTCDate())].join("-") +
+    `T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
 function toDatetimeLocal(iso: string) {
-  const d = new Date(iso);
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-  return d.toISOString().slice(0, 16);
+  return toVnLocal(new Date(new Date(iso).getTime() + VN_MS));
 }
 
 function minSchedule() {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset() + 5);
-  return d.toISOString().slice(0, 16);
+  return toVnLocal(new Date(Date.now() + VN_MS + 5 * 60 * 1000));
+}
+
+function datetimeLocalToIso(value: string): string {
+  return value;
 }
 
 export function EditForm({
@@ -79,7 +87,8 @@ export function EditForm({
     const fd = new FormData();
     fd.append("id", jobId);
     fd.append("caption", caption);
-    fd.append("schedule", schedule);
+    fd.append("schedule", datetimeLocalToIso(schedule));
+    fd.append("timezoneOffset", String(new Date().getTimezoneOffset()));
     fd.append("removeMedia", String(removed && !newMedia));
     if (newMedia) fd.append("mediaAssetId", newMedia.id);
 

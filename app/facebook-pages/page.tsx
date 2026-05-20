@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { importPagesWithToken, logoutAdmin } from "./actions";
+import { importPagesWithToken, logoutAdmin, purgeUnlinkedAccounts } from "./actions";
 import { PagesInventory } from "./pages-inventory";
 import { prisma } from "@/lib/prisma";
 import { requireAdminAccess } from "@/lib/security";
@@ -10,6 +10,8 @@ type PageProps = {
   searchParams?: Promise<{
     imported?: string;
     error?: string;
+    detail?: string;
+    purged?: string;
   }>;
 };
 
@@ -31,26 +33,33 @@ export default async function FacebookPagesDashboard({
 
   const params = await searchParams;
 
-  const pages = await prisma.facebook_pages.findMany({
-    orderBy: [{ created_at: "asc" }],
-    select: {
-      id: true,
-      page_id: true,
-      page_name: true,
-      is_active: true,
-      token_status: true,
-      daily_post_limit: true,
-      created_at: true,
-      updated_at: true,
-      facebook_accounts: {
-        select: {
-          id: true,
-          facebook_user_id: true,
-          facebook_user_name: true,
+  const [pages, categories] = await Promise.all([
+    prisma.facebook_pages.findMany({
+      orderBy: [{ created_at: "asc" }],
+      select: {
+        id: true,
+        page_id: true,
+        page_name: true,
+        is_active: true,
+        token_status: true,
+        daily_post_limit: true,
+        category_id: true,
+        created_at: true,
+        updated_at: true,
+        facebook_accounts: {
+          select: {
+            id: true,
+            facebook_user_id: true,
+            facebook_user_name: true,
+          },
         },
       },
-    },
-  });
+    }),
+    prisma.page_categories.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, color: true },
+    }),
+  ]);
 
   const facebookAccounts = await prisma.facebook_accounts.findMany({
     orderBy: [{ facebook_user_name: "asc" }],
@@ -69,7 +78,9 @@ export default async function FacebookPagesDashboard({
     0,
   );
   const importedCount = Number(params?.imported || 0);
+  const purgedCount = params?.purged !== undefined ? Number(params.purged) : null;
   const error = params?.error ? errorCopy[params.error] : "";
+  const errorDetail = params?.detail ?? "";
   const pageItems = pages.map(({ facebook_accounts, ...page }) => ({
     ...page,
     created_at: page.created_at.toISOString(),
@@ -82,6 +93,7 @@ export default async function FacebookPagesDashboard({
         }
       : null,
   }));
+  const categoryItems = categories.map((c) => ({ id: c.id, name: c.name, color: c.color }));
   const accountItems = facebookAccounts.map((account) => ({
     id: account.id,
     facebook_user_id: account.facebook_user_id,
@@ -122,6 +134,14 @@ export default async function FacebookPagesDashboard({
               >
                 Refresh
               </Link>
+              <form action={purgeUnlinkedAccounts}>
+                <button
+                  type="submit"
+                  className="inline-flex h-9 items-center justify-center rounded-md border border-[#f0b6b6] bg-white px-3 text-sm font-medium text-[#b42318] hover:bg-[#fff1f1]"
+                >
+                  Purge unlinked accounts
+                </button>
+              </form>
               <form action={logoutAdmin}>
                 <button
                   type="submit"
@@ -174,13 +194,24 @@ export default async function FacebookPagesDashboard({
           </div>
         ) : null}
 
-        {error ? (
-          <div className="rounded-md border border-[#f3b7b7] bg-[#fff1f1] px-4 py-3 text-sm text-[#b42318]">
-            {error}
+        {purgedCount !== null ? (
+          <div className="rounded-md border border-[#a9dbbb] bg-[#ecfdf3] px-4 py-3 text-sm text-[#067647]">
+            {purgedCount === 0
+              ? "No unlinked accounts found."
+              : `Deleted ${purgedCount} unlinked account${purgedCount === 1 ? "" : "s"}.`}
           </div>
         ) : null}
 
-        <PagesInventory pages={pageItems} accounts={accountItems} />
+        {error ? (
+          <div className="rounded-md border border-[#f3b7b7] bg-[#fff1f1] px-4 py-3 text-sm text-[#b42318]">
+            <p>{error}</p>
+            {errorDetail ? (
+              <p className="mt-1 font-mono text-xs opacity-80">{errorDetail}</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        <PagesInventory pages={pageItems} accounts={accountItems} categories={categoryItems} />
 
         <details className="rounded-lg border border-[#d9dee8] bg-white shadow-sm">
           <summary className="cursor-pointer px-5 py-4 text-sm font-semibold">

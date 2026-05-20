@@ -1,5 +1,6 @@
 import {
   createCipheriv,
+  createDecipheriv,
   createHash,
   randomBytes,
   randomUUID,
@@ -82,6 +83,96 @@ export function encryptFacebookToken(token: string) {
   )}:${encrypted.toString("base64")}`;
 }
 
+export function decryptFacebookToken(encrypted: string): string {
+  const parts = encrypted.split(":");
+  if (parts.length !== 4 || parts[0] !== "gcm") {
+    throw new Error("Invalid token format");
+  }
+  const [, ivB64, tagB64, encB64] = parts;
+  const iv = Buffer.from(ivB64, "base64");
+  const authTag = Buffer.from(tagB64, "base64");
+  const encryptedData = Buffer.from(encB64, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encryptedData), decipher.final()]).toString("utf8");
+}
+
+export async function postToFacebookPage({
+  pageId,
+  accessToken,
+  message,
+  photoUrls,
+}: {
+  pageId: string;
+  accessToken: string;
+  message?: string;
+  photoUrls?: string[];
+}): Promise<string> {
+  const version = graphVersion();
+
+  if (!photoUrls || photoUrls.length === 0) {
+    const body = new URLSearchParams({ access_token: accessToken });
+    if (message) body.set("message", message);
+    const res = await fetch(`https://graph.facebook.com/${version}/${pageId}/feed`, {
+      method: "POST", body, cache: "no-store",
+    });
+    const data = (await res.json()) as { id?: string; error?: { message?: string } };
+    if (!res.ok || data.error) throw new Error(data.error?.message ?? "Facebook API error");
+    return data.id ?? "";
+  }
+
+  if (photoUrls.length === 1) {
+    const body = new URLSearchParams({ access_token: accessToken, url: photoUrls[0] });
+    if (message) body.set("message", message);
+    const res = await fetch(`https://graph.facebook.com/${version}/${pageId}/photos`, {
+      method: "POST", body, cache: "no-store",
+    });
+    const data = (await res.json()) as { id?: string; post_id?: string; error?: { message?: string } };
+    if (!res.ok || data.error) throw new Error(data.error?.message ?? "Facebook API error");
+    return data.post_id ?? data.id ?? "";
+  }
+
+  // Multiple photos: upload each unpublished, then create a feed post
+  const photoIds = await Promise.all(
+    photoUrls.map((url) => uploadUnpublishedPhoto(pageId, accessToken, url)),
+  );
+
+  const parts = [`access_token=${encodeURIComponent(accessToken)}`];
+  if (message) parts.push(`message=${encodeURIComponent(message)}`);
+  photoIds.forEach((id, i) => {
+    parts.push(`attached_media[${i}]=${encodeURIComponent(JSON.stringify({ media_fbid: id }))}`);
+  });
+
+  const res = await fetch(`https://graph.facebook.com/${version}/${pageId}/feed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: parts.join("&"),
+    cache: "no-store",
+  });
+  const data = (await res.json()) as { id?: string; error?: { message?: string } };
+  if (!res.ok || data.error) throw new Error(data.error?.message ?? "Facebook API error");
+  return data.id ?? "";
+}
+
+async function uploadUnpublishedPhoto(
+  pageId: string,
+  accessToken: string,
+  photoUrl: string,
+): Promise<string> {
+  const version = graphVersion();
+  const body = new URLSearchParams({
+    access_token: accessToken,
+    url: photoUrl,
+    published: "false",
+  });
+  const res = await fetch(`https://graph.facebook.com/${version}/${pageId}/photos`, {
+    method: "POST", body, cache: "no-store",
+  });
+  const data = (await res.json()) as { id?: string; error?: { message?: string } };
+  if (!res.ok || data.error) throw new Error(data.error?.message ?? "Facebook photo upload error");
+  return data.id!;
+}
+
 async function readGraphJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     cache: "no-store",
@@ -139,7 +230,7 @@ export function facebookOAuthUrl(state: string) {
     redirect_uri: redirectUri,
     state,
     response_type: "code",
-    scope: ["pages_show_list", "pages_read_engagement"].join(","),
+    scope: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"].join(","),
   });
 
   return `https://www.facebook.com/${graphVersion()}/dialog/oauth?${params.toString()}`;
@@ -203,39 +294,46 @@ export async function importFacebookPages(userAccessToken: string) {
     },
   });
 
-  for (const page of pages) {
-    const encryptedToken = encryptFacebookToken(page.access_token || "");
+  await Promise.all(
+    pages.map(async (page) => {
+      try {
+        const encryptedToken = encryptFacebookToken(page.access_token!);
 
-    await prisma.facebook_pages.upsert({
-      where: {
-        page_id: page.id,
-      },
-      create: {
-        id: randomUUID(),
-        facebook_account_id: facebookAccount.id,
-        page_id: page.id,
-        page_name: page.name,
-        page_access_token_encrypted: encryptedToken,
-        token_status: "active",
-        updated_at: now,
-      },
-      update: {
-        facebook_account_id: facebookAccount.id,
-        page_name: page.name,
-        page_access_token_encrypted: encryptedToken,
-        token_status: "active",
-        is_active: true,
-        updated_at: now,
-      },
-    });
+        await prisma.facebook_pages.upsert({
+          where: { page_id: page.id },
+          create: {
+            id: randomUUID(),
+            facebook_account_id: facebookAccount.id,
+            page_id: page.id,
+            page_name: page.name,
+            page_access_token_encrypted: encryptedToken,
+            token_status: "active",
+            updated_at: now,
+          },
+          update: {
+            facebook_account_id: facebookAccount.id,
+            page_name: page.name,
+            page_access_token_encrypted: encryptedToken,
+            token_status: "active",
+            is_active: true,
+            updated_at: now,
+          },
+        });
 
-    imported.push({
-      pageId: page.id,
-      name: page.name,
-      tasks: page.tasks || [],
-      pictureUrl: page.picture?.data?.url,
-    });
-  }
+        imported.push({
+          pageId: page.id,
+          name: page.name,
+          tasks: page.tasks || [],
+          pictureUrl: page.picture?.data?.url,
+        });
+      } catch (err) {
+        console.error(
+          `[facebook] Failed to import page ${page.id} (${page.name}):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }),
+  );
 
   return imported;
 }

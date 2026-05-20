@@ -7,22 +7,34 @@ datasource db {
   provider = "postgresql"
 }
 
+model page_categories {
+  id             String           @id
+  name           String
+  color          String           @default("#6b7280")
+  created_at     DateTime         @default(now())
+  facebook_pages facebook_pages[]
+}
+
 model facebook_pages {
-  id                          String             @id
+  id                          String              @id
   facebook_account_id         String?
-  page_id                     String             @unique
+  page_id                     String              @unique
   page_name                   String
-  is_active                   Boolean            @default(true)
-  created_at                  DateTime           @default(now())
-  daily_post_limit            Int                @default(3)
+  is_active                   Boolean             @default(true)
+  created_at                  DateTime            @default(now())
+  daily_post_limit            Int                 @default(3)
   page_access_token_encrypted String
-  token_status                TokenStatus        @default(active)
+  token_status                TokenStatus         @default(active)
   updated_at                  DateTime
-  facebook_accounts           facebook_accounts? @relation(fields: [facebook_account_id], references: [id], onDelete: SetNull)
+  category_id                 String?
+  facebook_accounts           facebook_accounts?  @relation(fields: [facebook_account_id], references: [id], onDelete: SetNull)
+  page_categories             page_categories?    @relation(fields: [category_id], references: [id], onDelete: SetNull)
   page_media_usage            page_media_usage[]
   post_jobs                   post_jobs[]
+  auto_posting_rules          auto_posting_rules?
 
   @@index([facebook_account_id])
+  @@index([category_id])
 }
 
 model facebook_accounts {
@@ -50,7 +62,10 @@ model media_assets {
   expires_at       DateTime
   created_at       DateTime           @default(now())
   page_media_usage page_media_usage[]
-  post_jobs        post_jobs[]
+  post_job_media   post_job_media[]
+
+  @@index([status])
+  @@index([status, expires_at])
 }
 
 model page_media_usage {
@@ -72,21 +87,32 @@ model page_media_usage {
 model post_jobs {
   id               String             @id
   page_id          String
-  media_asset_id   String?
   caption          String?
-  scheduled_at     DateTime
+  scheduled_at     DateTime           @db.Timestamptz(3)
   status           PostJobStatus      @default(pending)
   error_message    String?
   fb_post_id       String?
-  posted_at        DateTime?
+  posted_at        DateTime?          @db.Timestamptz(3)
   created_at       DateTime           @default(now())
   page_media_usage page_media_usage[]
-  media_assets     media_assets?      @relation(fields: [media_asset_id], references: [id])
+  post_job_media   post_job_media[]
   facebook_pages   facebook_pages     @relation(fields: [page_id], references: [id], onDelete: Cascade)
 
-  @@index([media_asset_id])
   @@index([page_id])
+  @@index([page_id, status])
   @@index([status, scheduled_at])
+}
+
+model post_job_media {
+  id             String       @id
+  post_job_id    String
+  media_asset_id String
+  position       Int          @default(0)
+  post_jobs      post_jobs    @relation(fields: [post_job_id], references: [id], onDelete: Cascade)
+  media_assets   media_assets @relation(fields: [media_asset_id], references: [id])
+
+  @@unique([post_job_id, position])
+  @@index([post_job_id])
 }
 
 model settings {
@@ -127,4 +153,30 @@ enum TokenStatus {
 enum UserRole {
   admin
   editor
+}
+
+model caption_sheets {
+  id                 String               @id
+  name               String
+  captions           String[]
+  created_at         DateTime             @default(now())
+  updated_at         DateTime
+  auto_posting_rules auto_posting_rules[]
+}
+
+model auto_posting_rules {
+  id                String          @id
+  page_id           String          @unique
+  is_active         Boolean         @default(true)
+  schedule_type     String          @default("daily")
+  posts_count       Int             @default(1)
+  start_hour        Int             @default(8)
+  end_hour          Int             @default(22)
+  tag_filter        String[]
+  captions          String[]
+  caption_sheet_id  String?
+  created_at        DateTime        @default(now())
+  updated_at        DateTime
+  facebook_pages    facebook_pages  @relation(fields: [page_id], references: [id], onDelete: Cascade)
+  caption_sheets    caption_sheets? @relation(fields: [caption_sheet_id], references: [id], onDelete: SetNull)
 }

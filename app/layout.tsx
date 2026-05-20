@@ -22,7 +22,7 @@ export default async function RootLayout({
         {session?.userId ? (
           <div className="flex h-full overflow-hidden bg-[#f5f6fa]">
             <Sidebar userEmail={session.email} />
-            <div className="flex flex-1 flex-col overflow-y-auto">
+            <div className="flex flex-1 flex-col overflow-y-auto pt-14 md:pt-0">
               {children}
             </div>
           </div>

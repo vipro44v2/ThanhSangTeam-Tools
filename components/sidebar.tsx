@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { logout } from "@/app/actions";
 
 const NAV_MAIN = [
@@ -48,7 +49,6 @@ const NAV_MAIN = [
   {
     label: "Posting Logs",
     href: "/logs",
-    disabled: true,
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -59,7 +59,6 @@ const NAV_MAIN = [
   {
     label: "Auto Posting",
     href: "/auto-posting",
-    disabled: true,
     icon: (
       <svg className="size-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -117,26 +116,41 @@ const NAV_BOTTOM = [
   },
 ];
 
+const Logo = () => (
+  <div className="flex items-center gap-2.5">
+    <div className="flex size-8 items-center justify-center rounded-lg bg-[#1877f2]">
+      <svg className="size-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+      </svg>
+    </div>
+    <span className="text-sm font-bold text-[#101828]">FB Manager</span>
+  </div>
+);
+
 export function Sidebar({ userEmail }: { userEmail?: string }) {
   const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (mobileOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [mobileOpen]);
 
   function isActive(href: string) {
     if (href === "/dashboard") return pathname === "/dashboard" || pathname === "/";
     return pathname.startsWith(href);
   }
 
-  return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-[#f0f0f0] bg-white">
-      {/* Logo */}
-      <div className="flex items-center gap-2.5 border-b border-[#f0f0f0] px-5 py-4">
-        <div className="flex size-8 items-center justify-center rounded-lg bg-[#1877f2]">
-          <svg className="size-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
-          </svg>
-        </div>
-        <span className="text-sm font-bold text-[#101828]">FB Manager</span>
-      </div>
-
+  const navContent = (
+    <>
       {/* Main nav */}
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <ul className="flex flex-col gap-0.5">
@@ -207,6 +221,66 @@ export function Sidebar({ userEmail }: { userEmail?: string }) {
           </form>
         </div>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile top bar */}
+      <div className="fixed inset-x-0 top-0 z-30 flex h-14 items-center justify-between border-b border-[#f0f0f0] bg-white px-4 md:hidden">
+        <Logo />
+        <button
+          type="button"
+          aria-label="Open menu"
+          onClick={() => setMobileOpen(true)}
+          className="flex size-9 items-center justify-center rounded-lg text-[#475467] hover:bg-[#f9fafb]"
+        >
+          <svg className="size-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Mobile backdrop */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+          onClick={() => setMobileOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Desktop sidebar */}
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-[#f0f0f0] bg-white md:flex">
+        {/* Logo */}
+        <div className="flex items-center gap-2.5 border-b border-[#f0f0f0] px-5 py-4">
+          <Logo />
+        </div>
+        {navContent}
+      </aside>
+
+      {/* Mobile drawer */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r border-[#f0f0f0] bg-white transition-transform duration-200 ease-in-out md:hidden ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        {/* Drawer header */}
+        <div className="flex items-center justify-between border-b border-[#f0f0f0] px-5 py-4">
+          <Logo />
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={() => setMobileOpen(false)}
+            className="flex size-8 items-center justify-center rounded-lg text-[#475467] hover:bg-[#f9fafb]"
+          >
+            <svg className="size-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        {navContent}
+      </aside>
+    </>
   );
 }
