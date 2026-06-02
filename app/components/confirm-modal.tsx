@@ -6,6 +6,7 @@ type ConfirmModalProps = {
   title: string;
   description?: ReactNode;
   confirmLabel?: string;
+  pendingLabel?: string;
   isPending?: boolean;
   onConfirm: () => void;
   onClose: () => void;
@@ -15,6 +16,7 @@ export function ConfirmModal({
   title,
   description,
   confirmLabel = "Delete",
+  pendingLabel = "Deleting...",
   isPending = false,
   onConfirm,
   onClose,
@@ -54,7 +56,7 @@ export function ConfirmModal({
             {isPending ? (
               <span className="flex items-center justify-center gap-2">
                 <span className="size-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                Deleting…
+                {pendingLabel}
               </span>
             ) : (
               confirmLabel

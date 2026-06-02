@@ -6,8 +6,9 @@ import {
   isMediaAssetExpired,
   isMediaAssetExpiringSoon,
   parseExpiryDateInput,
-  parseTags,
+  parseFileNameInput,
   parseRetentionDaysInput,
+  parseTags,
   resolveUploadRetentionDays,
   resolveUploadTags,
   validateMediaFile,
@@ -55,6 +56,7 @@ test("parseRetentionDaysInput rejects invalid days", () => {
   assert.throws(() => parseRetentionDaysInput("-1"), /Invalid expiry days/);
   assert.throws(() => parseRetentionDaysInput("1.5"), /Invalid expiry days/);
   assert.throws(() => parseRetentionDaysInput("abc"), /Invalid expiry days/);
+  assert.throws(() => parseRetentionDaysInput("366"), /Expiry days cannot exceed 365/);
 });
 
 test("validateMediaFile accepts supported image files under the size limit", () => {
@@ -111,10 +113,35 @@ test("isMediaAssetExpiringSoon detects active assets expiring within the window"
 });
 
 test("parseExpiryDateInput accepts yyyy-mm-dd dates", () => {
-  assert.equal(parseExpiryDateInput("2026-05-31").toISOString(), "2026-05-31T00:00:00.000Z");
+  assert.equal(
+    parseExpiryDateInput("2026-05-31", { now: new Date("2026-05-21T10:00:00.000Z") }).toISOString(),
+    "2026-05-31T00:00:00.000Z",
+  );
 });
 
 test("parseExpiryDateInput rejects invalid dates", () => {
   assert.throws(() => parseExpiryDateInput("2026-02-31"), /Invalid expiry date/);
   assert.throws(() => parseExpiryDateInput("not-a-date"), /Invalid expiry date/);
+});
+
+test("parseExpiryDateInput rejects past dates", () => {
+  assert.throws(
+    () => parseExpiryDateInput("2026-05-20", { now: new Date("2026-05-21T10:00:00.000Z") }),
+    /Expiry date cannot be in the past/,
+  );
+});
+
+test("parseExpiryDateInput rejects dates more than 365 days ahead", () => {
+  assert.throws(
+    () => parseExpiryDateInput("2027-05-22", { now: new Date("2026-05-21T10:00:00.000Z") }),
+    /Expiry date cannot be more than 365 days from today/,
+  );
+});
+
+test("parseFileNameInput trims a valid file name", () => {
+  assert.equal(parseFileNameInput("  nurse-photo.jpg  "), "nurse-photo.jpg");
+});
+
+test("parseFileNameInput rejects empty file names", () => {
+  assert.throws(() => parseFileNameInput("   "), /File name is required/);
 });

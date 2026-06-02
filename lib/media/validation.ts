@@ -18,6 +18,8 @@ export type MediaValidationResult =
   | { ok: true }
   | { ok: false; error: string };
 
+export const MEDIA_MAX_EXPIRY_DAYS = 365;
+
 export function parseTags(input: string | null | undefined): string[] {
   if (!input) {
     return [];
@@ -38,6 +40,16 @@ export function parseTags(input: string | null | undefined): string[] {
   }
 
   return tags;
+}
+
+export function parseFileNameInput(input: string): string {
+  const fileName = input.trim();
+
+  if (!fileName) {
+    throw new Error("File name is required.");
+  }
+
+  return fileName;
 }
 
 export function resolveUploadTags(sharedTags: string, fileTags: string[], fileIndex: number): string {
@@ -113,10 +125,17 @@ export function parseRetentionDaysInput(input: string): number {
     throw new Error("Invalid expiry days.");
   }
 
+  if (retentionDays > MEDIA_MAX_EXPIRY_DAYS) {
+    throw new Error(`Expiry days cannot exceed ${MEDIA_MAX_EXPIRY_DAYS}.`);
+  }
+
   return retentionDays;
 }
 
-export function parseExpiryDateInput(input: string): Date {
+export function parseExpiryDateInput(
+  input: string,
+  options: { now?: Date; maxDays?: number } = {},
+): Date {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input);
 
   if (!match) {
@@ -136,7 +155,40 @@ export function parseExpiryDateInput(input: string): Date {
     throw new Error("Invalid expiry date.");
   }
 
+  const now = options.now ?? new Date();
+  const today = startOfUtcDay(now);
+  const maxDays = options.maxDays ?? MEDIA_MAX_EXPIRY_DAYS;
+  const maxExpiryDate = new Date(today);
+  maxExpiryDate.setUTCDate(maxExpiryDate.getUTCDate() + maxDays);
+
+  if (expiresAt.getTime() < today.getTime()) {
+    throw new Error("Expiry date cannot be in the past.");
+  }
+
+  if (expiresAt.getTime() > maxExpiryDate.getTime()) {
+    throw new Error(`Expiry date cannot be more than ${maxDays} days from today.`);
+  }
+
   return expiresAt;
+}
+
+export function formatDateInputValue(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+export function getExpiryDateBounds(now = new Date(), maxDays = MEDIA_MAX_EXPIRY_DAYS) {
+  const min = startOfUtcDay(now);
+  const max = new Date(min);
+  max.setUTCDate(max.getUTCDate() + maxDays);
+
+  return {
+    min: formatDateInputValue(min),
+    max: formatDateInputValue(max),
+  };
+}
+
+function startOfUtcDay(value: Date): Date {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
 }
 
 export function getMediaUploadConfig() {

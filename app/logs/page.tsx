@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { Prisma, type PostJobStatus } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdminAccess } from "@/lib/security";
 import { LogsList } from "./logs-list";
@@ -6,7 +7,7 @@ import { LogsList } from "./logs-list";
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 30;
-const VALID_STATUSES = ["posted", "failed", "skipped", "processing"] as const;
+const VALID_STATUSES = ["posted", "failed", "skipped", "processing"] satisfies PostJobStatus[];
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
 type PageProps = {
@@ -29,8 +30,8 @@ export default async function LogsPage({ searchParams }: PageProps) {
     ? (statusParam as ValidStatus)
     : null;
 
-  const where = {
-    status: statusFilter ? ({ equals: statusFilter } as const) : ({ in: [...VALID_STATUSES] } as const),
+  const where: Prisma.post_jobsWhereInput = {
+    status: statusFilter ? { equals: statusFilter } : { in: [...VALID_STATUSES] },
     ...(pageIdParam ? { page_id: pageIdParam } : {}),
   };
 

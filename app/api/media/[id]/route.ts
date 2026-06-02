@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { markMediaAssetDeleted, updateMediaAsset } from "@/lib/media/service";
+import { markMediaAssetDeleted, permanentlyDeleteMediaAsset, updateMediaAsset } from "@/lib/media/service";
 
 export const runtime = "nodejs";
 
@@ -10,11 +10,14 @@ type RouteContext = {
   }>;
 };
 
-export async function DELETE(_request: NextRequest, context: RouteContext) {
+export async function DELETE(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
 
   try {
-    const asset = await markMediaAssetDeleted(id);
+    const isPermanentDelete = request.nextUrl.searchParams.get("permanent") === "true";
+    const asset = isPermanentDelete
+      ? await permanentlyDeleteMediaAsset(id)
+      : await markMediaAssetDeleted(id);
 
     if (!asset) {
       return NextResponse.json({ error: "Media asset not found." }, { status: 404 });
@@ -37,6 +40,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
     const body = await request.json();
     const asset = await updateMediaAsset(id, {
+      file_name: typeof body.file_name === "string" ? body.file_name : undefined,
       expires_at: typeof body.expires_at === "string" ? body.expires_at : undefined,
       tags: typeof body.tags === "string" ? body.tags : undefined,
       status: typeof body.status === "string" ? body.status : undefined,

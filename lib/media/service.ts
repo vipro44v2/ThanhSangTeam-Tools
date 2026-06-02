@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { MediaStatus } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/prisma";
+import {
+  buildBulkMediaUpdateData,
+  parseBulkMediaUpdateInput,
+  type BulkMediaUpdateInput,
+} from "@/lib/media/bulk";
 import { readImageDimensions } from "@/lib/media/image-dimensions";
 import { deleteMediaFile, saveMediaFile } from "@/lib/media/local-storage";
 import { MediaListParams, parseMediaStatus } from "@/lib/media/query";
@@ -10,6 +15,7 @@ import {
   getMediaUploadConfig,
   isMediaAssetExpiringSoon,
   parseExpiryDateInput,
+  parseFileNameInput,
   parseRetentionDaysInput,
   parseTags,
   resolveUploadRetentionDays,
@@ -87,9 +93,23 @@ export async function createMediaAssets(
 export async function listMediaAssets(params: MediaListParams) {
   await cleanupExpiredMediaAssets();
 
+  const now = new Date();
+  const expiringWindowEnd = new Date(now);
+  expiringWindowEnd.setDate(expiringWindowEnd.getDate() + EXPIRING_SOON_DAYS);
+
   const where = {
     ...(params.tag ? { tags: { has: params.tag } } : {}),
-    ...(params.status
+    ...(params.expiringSoon
+      ? {
+          status: {
+            not: MediaStatus.deleted,
+          },
+          expires_at: {
+            gt: now,
+            lte: expiringWindowEnd,
+          },
+        }
+      : params.status
       ? { status: params.status }
       : { status: { not: MediaStatus.deleted } }),
     ...(params.search
@@ -230,16 +250,22 @@ export async function cleanupExpiredMediaAssets(now = new Date()) {
 export async function updateMediaAsset(
   id: string,
   input: {
+    file_name?: string;
     expires_at?: string;
     tags?: string;
     status?: string;
   },
 ) {
   const data: {
+    file_name?: string;
     expires_at?: Date;
     tags?: string[];
     status?: MediaStatus;
   } = {};
+
+  if (input.file_name !== undefined) {
+    data.file_name = parseFileNameInput(input.file_name);
+  }
 
   if (input.expires_at !== undefined) {
     data.expires_at = parseExpiryDateInput(input.expires_at);
@@ -269,16 +295,49 @@ export async function updateMediaAsset(
   });
 }
 
+export async function bulkUpdateMediaAssets(ids: string[], input: BulkMediaUpdateInput) {
+  if (ids.length === 0) {
+    throw new Error("Select at least one media asset.");
+  }
+
+  const update = parseBulkMediaUpdateInput(input);
+  const assets = await prisma.media_assets.findMany({
+    where: {
+      id: {
+        in: ids,
+      },
+    },
+    select: {
+      id: true,
+      tags: true,
+    },
+  });
+
+  if (assets.length === 0) {
+    return { count: 0 };
+  }
+
+  await prisma.$transaction(
+    assets.map((asset) =>
+      prisma.media_assets.update({
+        where: { id: asset.id },
+        data: buildBulkMediaUpdateData(asset, update),
+      }),
+    ),
+  );
+
+  return { count: assets.length };
+}
+
 export async function markMediaAssetDeleted(id: string) {
   const asset = await prisma.media_assets.findUnique({
     where: { id },
+    select: { id: true },
   });
 
   if (!asset) {
     return null;
   }
-
-  await deleteMediaFile(asset.storage_key);
 
   return prisma.media_assets.update({
     where: { id },
@@ -286,4 +345,88 @@ export async function markMediaAssetDeleted(id: string) {
       status: MediaStatus.deleted,
     },
   });
+}
+
+export async function permanentlyDeleteMediaAsset(id: string) {
+  const asset = await prisma.media_assets.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      status: true,
+      storage_key: true,
+      _count: {
+        select: {
+          post_job_media: true,
+        },
+      },
+    },
+  });
+
+  if (!asset) {
+    return null;
+  }
+
+  if (asset.status !== MediaStatus.deleted) {
+    throw new Error("Only deleted media assets can be permanently deleted.");
+  }
+
+  if (asset._count.post_job_media > 0) {
+    throw new Error("This media asset is linked to scheduled or posted jobs and cannot be permanently deleted.");
+  }
+
+  await deleteMediaFile(asset.storage_key);
+
+  return prisma.media_assets.delete({
+    where: { id },
+  });
+}
+
+export async function permanentlyDeleteMediaAssets(ids: string[]) {
+  if (ids.length === 0) {
+    throw new Error("Select at least one deleted media asset.");
+  }
+
+  const assets = await prisma.media_assets.findMany({
+    where: {
+      id: {
+        in: ids,
+      },
+    },
+    select: {
+      id: true,
+      status: true,
+      storage_key: true,
+      _count: {
+        select: {
+          post_job_media: true,
+        },
+      },
+    },
+  });
+
+  if (assets.length === 0) {
+    return { count: 0 };
+  }
+
+  if (assets.some((asset) => asset.status !== MediaStatus.deleted)) {
+    throw new Error("Only deleted media assets can be permanently deleted.");
+  }
+
+  if (assets.some((asset) => asset._count.post_job_media > 0)) {
+    throw new Error("One or more media assets are linked to scheduled or posted jobs and cannot be permanently deleted.");
+  }
+
+  for (const asset of assets) {
+    await deleteMediaFile(asset.storage_key);
+  }
+
+  const result = await prisma.media_assets.deleteMany({
+    where: {
+      id: {
+        in: assets.map((asset) => asset.id),
+      },
+    },
+  });
+
+  return { count: result.count };
 }

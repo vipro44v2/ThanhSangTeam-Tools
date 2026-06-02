@@ -2,6 +2,8 @@
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmModal } from "@/app/components/confirm-modal";
+import { getMediaCardActions, type MediaCardAction } from "@/lib/media/card-action";
+import { getExpiryDateBounds, MEDIA_MAX_EXPIRY_DAYS } from "@/lib/media/validation";
 
 type MediaAsset = {
   id: string;
@@ -43,9 +45,13 @@ type SelectedFilePreview = {
   previewUrl: string;
 };
 
-const STATUS_OPTIONS = ["all", "available", "used", "expired", "deleted"] as const;
+const STATUS_OPTIONS = ["all", "available", "used", "expiring", "expired", "deleted"] as const;
 const EDITABLE_STATUS_OPTIONS = ["available", "used", "expired", "deleted"] as const;
+const BULK_STATUS_OPTIONS = ["", ...EDITABLE_STATUS_OPTIONS] as const;
 const PAGE_SIZE = 24;
+const EXPIRY_DATE_BOUNDS = getExpiryDateBounds();
+type BulkConfirmAction = "delete" | "restore" | "permanentDelete";
+type BulkTagsMode = "add" | "replace";
 
 export default function MediaLibraryPage() {
   const [assets, setAssets] = useState<MediaAsset[]>([]);
@@ -73,7 +79,16 @@ export default function MediaLibraryPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isBulkPending, setIsBulkPending] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<MediaAsset | null>(null);
+  const [permanentDeleteTarget, setPermanentDeleteTarget] = useState<MediaAsset | null>(null);
+  const [bulkConfirmAction, setBulkConfirmAction] = useState<BulkConfirmAction | null>(null);
+  const [isBulkEditOpen, setIsBulkEditOpen] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<(typeof BULK_STATUS_OPTIONS)[number]>("");
+  const [bulkTags, setBulkTags] = useState("");
+  const [bulkTagsMode, setBulkTagsMode] = useState<BulkTagsMode>("add");
+  const [bulkExpiresAt, setBulkExpiresAt] = useState("");
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [errors, setErrors] = useState<UploadError[]>([]);
   const [stats, setStats] = useState<MediaStats>({
@@ -111,10 +126,15 @@ export default function MediaLibraryPage() {
       return;
     }
     setAssets(data.assets);
+    setSelectedAssetIds((current) => {
+      const visibleIds = new Set<string>(data.assets.map((asset: MediaAsset) => asset.id));
+      return current.filter((id) => visibleIds.has(id));
+    });
     setPagination(data.pagination);
     setIsLoading(false);
   }, [loadStats, page, debouncedSearch, debouncedTagFilter, statusFilter]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadAssets(); }, [loadAssets]);
   useEffect(() => { void loadTags(); }, []);
   useEffect(() => { selectedPreviewsRef.current = selectedPreviews; }, [selectedPreviews]);
@@ -131,6 +151,9 @@ export default function MediaLibraryPage() {
   }, [tagFilter]);
 
   const activePreview = activePreviewIndex === null ? null : selectedPreviews[activePreviewIndex] ?? null;
+  const selectedDeletedAssetIds = assets
+    .filter((asset) => asset.status === "deleted" && selectedAssetIds.includes(asset.id))
+    .map((asset) => asset.id);
 
   useEffect(() => {
     if (!activePreview) return;
@@ -142,6 +165,22 @@ export default function MediaLibraryPage() {
   }, [activePreview]);
 
   function resetToFirstPage() { setPage(1); }
+
+  function toggleAssetSelection(assetId: string) {
+    setSelectedAssetIds((current) =>
+      current.includes(assetId)
+        ? current.filter((id) => id !== assetId)
+        : [...current, assetId],
+    );
+  }
+
+  function selectVisibleAssets() {
+    setSelectedAssetIds(assets.map((asset) => asset.id));
+  }
+
+  function clearSelectedAssets() {
+    setSelectedAssetIds([]);
+  }
 
   async function loadTags() {
     const response = await fetch("/api/media/tags");
@@ -255,6 +294,154 @@ export default function MediaLibraryPage() {
     setMessage(`Deleted ${asset.file_name}.`);
   }
 
+  async function handlePermanentDelete(asset: MediaAsset) {
+    const prevAssets = assets;
+    const prevStats = stats;
+    const prevPagination = pagination;
+
+    setAssets((cur) => cur.filter((a) => a.id !== asset.id));
+    setPagination((cur) => ({
+      ...cur,
+      total: Math.max(0, cur.total - 1),
+      totalPages: Math.max(1, Math.ceil((cur.total - 1) / PAGE_SIZE)),
+    }));
+    setStats((cur) => ({
+      ...cur,
+      deleted: Math.max(0, cur.deleted - 1),
+    }));
+
+    const response = await fetch(`/api/media/${asset.id}?permanent=true`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) {
+      setAssets(prevAssets);
+      setPagination(prevPagination);
+      setStats(prevStats);
+      setMessage(data.error ?? "Permanent delete failed.");
+      return;
+    }
+    setMessage(`Permanently deleted ${asset.file_name}.`);
+  }
+
+  async function handleRestore(asset: MediaAsset) {
+    await handleUpdate(asset, {
+      file_name: asset.file_name,
+      expires_at: formatDateInputValue(asset.expires_at),
+      tags: asset.tags.join(", "),
+      status: "available",
+    });
+    setMessage(`Restored ${asset.file_name}.`);
+  }
+
+  async function runBulkUpdate(
+    updates: { status?: MediaAsset["status"]; tags?: string; tagsMode?: BulkTagsMode; expires_at?: string },
+    successMessage: string,
+  ) {
+    if (selectedAssetIds.length === 0) {
+      setMessage("Select at least one media asset.");
+      return false;
+    }
+
+    setIsBulkPending(true);
+    const response = await fetch("/api/media/bulk", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ids: selectedAssetIds,
+        updates,
+      }),
+    });
+    const data = await response.json();
+    setIsBulkPending(false);
+
+    if (!response.ok) {
+      setMessage(data.error ?? "Bulk update failed.");
+      return false;
+    }
+
+    setMessage(successMessage.replace("{count}", String(data.count ?? selectedAssetIds.length)));
+    clearSelectedAssets();
+    await loadTags();
+    await loadAssets();
+    return true;
+  }
+
+  async function handleBulkConfirm() {
+    if (!bulkConfirmAction) return;
+
+    const action = bulkConfirmAction;
+    if (action === "permanentDelete") {
+      const success = await runBulkPermanentDelete();
+      if (success) {
+        setBulkConfirmAction(null);
+      }
+      return;
+    }
+
+    const success = await runBulkUpdate(
+      { status: action === "delete" ? "deleted" : "available" },
+      action === "delete" ? "Deleted {count} media assets." : "Restored {count} media assets.",
+    );
+
+    if (success) {
+      setBulkConfirmAction(null);
+    }
+  }
+
+  async function runBulkPermanentDelete() {
+    if (selectedDeletedAssetIds.length === 0) {
+      setMessage("Select at least one deleted media asset.");
+      return false;
+    }
+
+    setIsBulkPending(true);
+    const response = await fetch("/api/media/bulk", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ids: selectedDeletedAssetIds,
+      }),
+    });
+    const data = await response.json();
+    setIsBulkPending(false);
+
+    if (!response.ok) {
+      setMessage(data.error ?? "Permanent delete failed.");
+      return false;
+    }
+
+    setMessage(`Permanently deleted ${data.count ?? selectedDeletedAssetIds.length} media assets.`);
+    clearSelectedAssets();
+    await loadTags();
+    await loadAssets();
+    return true;
+  }
+
+  async function handleBulkEditSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const updates: { status?: MediaAsset["status"]; tags?: string; tagsMode?: BulkTagsMode; expires_at?: string } = {};
+    if (bulkStatus) updates.status = bulkStatus;
+    if (bulkTags.trim()) {
+      updates.tags = bulkTags;
+      updates.tagsMode = bulkTagsMode;
+    }
+    if (bulkExpiresAt) updates.expires_at = bulkExpiresAt;
+
+    if (!updates.status && !updates.tags && !updates.expires_at) {
+      setMessage("Choose at least one field to bulk edit.");
+      return;
+    }
+
+    const success = await runBulkUpdate(updates, "Updated {count} media assets.");
+    if (success) {
+      setIsBulkEditOpen(false);
+      setBulkStatus("");
+      setBulkTags("");
+      setBulkTagsMode("add");
+      setBulkExpiresAt("");
+    }
+  }
+
   async function handleDeleteConfirm() {
     if (!deleteTarget) return;
     setIsDeleting(true);
@@ -263,18 +450,33 @@ export default function MediaLibraryPage() {
     setIsDeleting(false);
   }
 
+  async function handlePermanentDeleteConfirm() {
+    if (!permanentDeleteTarget) return;
+    setIsDeleting(true);
+    await handlePermanentDelete(permanentDeleteTarget);
+    setPermanentDeleteTarget(null);
+    setIsDeleting(false);
+  }
+
   async function handleUpdate(
     asset: MediaAsset,
-    updates: { expires_at: string; tags: string; status: MediaAsset["status"] },
+    updates: { file_name: string; expires_at: string; tags: string; status: MediaAsset["status"] },
   ) {
     const prevAssets = assets;
     const prevStats = stats;
     const updatedTags = updates.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    const updatedFileName = updates.file_name.trim();
 
     setAssets((cur) =>
       cur.map((a) =>
         a.id === asset.id
-          ? { ...a, tags: updatedTags, expires_at: new Date(updates.expires_at).toISOString(), status: updates.status }
+          ? {
+              ...a,
+              file_name: updatedFileName || a.file_name,
+              tags: updatedTags,
+              expires_at: new Date(updates.expires_at).toISOString(),
+              status: updates.status,
+            }
           : a,
       ),
     );
@@ -357,7 +559,7 @@ export default function MediaLibraryPage() {
               Expiry days for all images
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                min="1" placeholder="Default 7 days" step="1" type="number"
+                max={MEDIA_MAX_EXPIRY_DAYS} min="1" placeholder="Default 7 days" step="1" type="number"
                 value={expiresInDays}
                 onChange={(e) => setExpiresInDays(e.target.value)}
               />
@@ -402,7 +604,7 @@ export default function MediaLibraryPage() {
                         <label className="grid gap-1 text-xs font-medium text-slate-600">
                           Expiry days
                           <input className="min-w-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                            min="1" placeholder="Default 7 days" step="1" type="number"
+                            max={MEDIA_MAX_EXPIRY_DAYS} min="1" placeholder="Default 7 days" step="1" type="number"
                             value={fileExpiresInDays[index] ?? ""} onChange={(e) => updateFileExpiresInDays(index, e.target.value)} />
                         </label>
                       </div>
@@ -447,7 +649,7 @@ export default function MediaLibraryPage() {
                 Status
                 <select className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                   value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as typeof statusFilter); resetToFirstPage(); }}>
-                  {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                  {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{formatStatusFilterLabel(s)}</option>)}
                 </select>
               </label>
             </div>
@@ -463,6 +665,21 @@ export default function MediaLibraryPage() {
               </div>
             )}
 
+            {assets.length > 0 && (
+              <BulkActionsBar
+                selectedCount={selectedAssetIds.length}
+                selectedDeletedCount={selectedDeletedAssetIds.length}
+                visibleCount={assets.length}
+                isPending={isBulkPending}
+                onSelectVisible={selectVisibleAssets}
+                onClear={clearSelectedAssets}
+                onEdit={() => setIsBulkEditOpen(true)}
+                onDelete={() => setBulkConfirmAction("delete")}
+                onRestore={() => setBulkConfirmAction("restore")}
+                onPermanentDelete={() => setBulkConfirmAction("permanentDelete")}
+              />
+            )}
+
             {isLoading ? (
               <div className="rounded-lg border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">Loading media assets...</div>
             ) : assets.length === 0 ? (
@@ -470,7 +687,16 @@ export default function MediaLibraryPage() {
             ) : (
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {assets.map((asset) => (
-                  <MediaCard key={asset.id} asset={asset} onDelete={(a) => setDeleteTarget(a)} onUpdate={handleUpdate} />
+                  <MediaCard
+                    key={asset.id}
+                    asset={asset}
+                    isSelected={selectedAssetIds.includes(asset.id)}
+                    onDelete={(a) => setDeleteTarget(a)}
+                    onPermanentDelete={(a) => setPermanentDeleteTarget(a)}
+                    onRestore={handleRestore}
+                    onToggleSelection={toggleAssetSelection}
+                    onUpdate={handleUpdate}
+                  />
                 ))}
               </div>
             )}
@@ -517,15 +743,267 @@ export default function MediaLibraryPage() {
           title="Delete media asset?"
           description={
             <>
-              <span className="font-medium text-[#344054]">{deleteTarget.file_name}</span> will be permanently deleted. This cannot be undone.
+              <span className="font-medium text-[#344054]">{deleteTarget.file_name}</span> will be marked deleted and can be restored later.
             </>
           }
           isPending={isDeleting}
+          pendingLabel="Deleting..."
           onConfirm={handleDeleteConfirm}
           onClose={() => setDeleteTarget(null)}
         />
       )}
+
+      {permanentDeleteTarget && (
+        <ConfirmModal
+          title="Permanently delete media asset?"
+          description={
+            <>
+              <span className="font-medium text-[#344054]">{permanentDeleteTarget.file_name}</span> will be removed from storage and cannot be restored.
+            </>
+          }
+          confirmLabel="Delete Forever"
+          isPending={isDeleting}
+          pendingLabel="Deleting..."
+          onConfirm={handlePermanentDeleteConfirm}
+          onClose={() => setPermanentDeleteTarget(null)}
+        />
+      )}
+
+      {bulkConfirmAction && (
+        <ConfirmModal
+          title={getBulkConfirmTitle(bulkConfirmAction)}
+          description={getBulkConfirmDescription(bulkConfirmAction, selectedAssetIds.length, selectedDeletedAssetIds.length)}
+          confirmLabel={getBulkConfirmLabel(bulkConfirmAction)}
+          pendingLabel={bulkConfirmAction === "restore" ? "Restoring..." : "Deleting..."}
+          isPending={isBulkPending}
+          onConfirm={handleBulkConfirm}
+          onClose={() => setBulkConfirmAction(null)}
+        />
+      )}
+
+      {isBulkEditOpen && (
+        <BulkEditModal
+          status={bulkStatus}
+          tags={bulkTags}
+          tagsMode={bulkTagsMode}
+          expiresAt={bulkExpiresAt}
+          selectedCount={selectedAssetIds.length}
+          isPending={isBulkPending}
+          onStatusChange={setBulkStatus}
+          onTagsChange={setBulkTags}
+          onTagsModeChange={setBulkTagsMode}
+          onExpiresAtChange={setBulkExpiresAt}
+          onSubmit={handleBulkEditSubmit}
+          onClose={() => setIsBulkEditOpen(false)}
+        />
+      )}
     </main>
+  );
+}
+
+function BulkActionsBar({
+  selectedCount,
+  selectedDeletedCount,
+  visibleCount,
+  isPending,
+  onSelectVisible,
+  onClear,
+  onEdit,
+  onDelete,
+  onRestore,
+  onPermanentDelete,
+}: {
+  selectedCount: number;
+  selectedDeletedCount: number;
+  visibleCount: number;
+  isPending: boolean;
+  onSelectVisible: () => void;
+  onClear: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onRestore: () => void;
+  onPermanentDelete: () => void;
+}) {
+  const hasSelection = selectedCount > 0;
+  const hasDeletedSelection = selectedDeletedCount > 0;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-sm sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onSelectVisible}
+          disabled={isPending || visibleCount === 0}
+          className="rounded-md border border-slate-300 px-3 py-2 font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Select All
+        </button>
+        <span className="text-slate-600">
+          {selectedCount} selected
+        </span>
+        {hasSelection ? (
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={isPending}
+            className="text-sm font-medium text-slate-500 transition hover:text-slate-800 disabled:opacity-50"
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:w-[460px] sm:grid-cols-4">
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={!hasSelection || isPending}
+          className="rounded-md border border-slate-300 px-3 py-2 font-medium text-slate-700 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={!hasSelection || isPending}
+          className="rounded-md border border-slate-300 px-3 py-2 font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Delete
+        </button>
+        <button
+          type="button"
+          onClick={onRestore}
+          disabled={!hasSelection || isPending}
+          className="rounded-md border border-emerald-200 px-3 py-2 font-medium text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Restore
+        </button>
+        <button
+          type="button"
+          onClick={onPermanentDelete}
+          disabled={!hasDeletedSelection || isPending}
+          className="rounded-md border border-rose-200 px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Delete Forever
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BulkEditModal({
+  status,
+  tags,
+  tagsMode,
+  expiresAt,
+  selectedCount,
+  isPending,
+  onStatusChange,
+  onTagsChange,
+  onTagsModeChange,
+  onExpiresAtChange,
+  onSubmit,
+  onClose,
+}: {
+  status: (typeof BULK_STATUS_OPTIONS)[number];
+  tags: string;
+  tagsMode: BulkTagsMode;
+  expiresAt: string;
+  selectedCount: number;
+  isPending: boolean;
+  onStatusChange: (value: (typeof BULK_STATUS_OPTIONS)[number]) => void;
+  onTagsChange: (value: string) => void;
+  onTagsModeChange: (value: BulkTagsMode) => void;
+  onExpiresAtChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/40 backdrop-blur-[2px]"
+        aria-label="Close bulk edit"
+        onClick={!isPending ? onClose : undefined}
+      />
+      <form onSubmit={onSubmit} className="relative w-full max-w-md rounded-2xl border border-[#e4e9f2] bg-white p-6 shadow-2xl">
+        <h2 className="text-base font-semibold text-[#101828]">Bulk edit media</h2>
+        <p className="mt-1 text-sm text-[#667085]">
+          {selectedCount} selected media asset{selectedCount === 1 ? "" : "s"}. Empty fields stay unchanged.
+        </p>
+        <div className="mt-5 grid gap-4">
+          <label className="grid gap-2 text-sm font-medium text-slate-700">
+            Status
+            <select
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+              value={status}
+              onChange={(event) => onStatusChange(event.target.value as (typeof BULK_STATUS_OPTIONS)[number])}
+            >
+              <option value="">No change</option>
+              {EDITABLE_STATUS_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm font-medium text-slate-700">
+            Tags
+            <input
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+              placeholder="night shift, test2"
+              value={tags}
+              onChange={(event) => onTagsChange(event.target.value)}
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => onTagsModeChange("add")}
+              className={tagsMode === "add"
+                ? "rounded-md border border-teal-500 bg-teal-50 px-3 py-2 text-sm font-medium text-teal-800"
+                : "rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"}
+            >
+              Add tags
+            </button>
+            <button
+              type="button"
+              onClick={() => onTagsModeChange("replace")}
+              className={tagsMode === "replace"
+                ? "rounded-md border border-teal-500 bg-teal-50 px-3 py-2 text-sm font-medium text-teal-800"
+                : "rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"}
+            >
+              Replace tags
+            </button>
+          </div>
+          <label className="grid gap-2 text-sm font-medium text-slate-700">
+            Expiry date
+            <input
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+              type="date"
+              min={EXPIRY_DATE_BOUNDS.min}
+              max={EXPIRY_DATE_BOUNDS.max}
+              value={expiresAt}
+              onChange={(event) => onExpiresAtChange(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isPending}
+            className="rounded-lg border border-[#d0d5dd] py-2.5 text-sm font-semibold text-[#344054] transition hover:bg-[#f2f4f7] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isPending}
+            className="rounded-lg bg-teal-700 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:opacity-50"
+          >
+            {isPending ? "Saving..." : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -538,17 +1016,26 @@ function StatCard({ label, value }: { label: string; value: number }) {
   );
 }
 
-function MediaCard({ asset, onDelete, onUpdate }: {
+function MediaCard({ asset, isSelected, onDelete, onPermanentDelete, onRestore, onToggleSelection, onUpdate }: {
   asset: MediaAsset;
+  isSelected: boolean;
   onDelete: (asset: MediaAsset) => void;
-  onUpdate: (asset: MediaAsset, updates: { expires_at: string; tags: string; status: MediaAsset["status"] }) => void;
+  onPermanentDelete: (asset: MediaAsset) => void;
+  onRestore: (asset: MediaAsset) => void;
+  onToggleSelection: (assetId: string) => void;
+  onUpdate: (
+    asset: MediaAsset,
+    updates: { file_name: string; expires_at: string; tags: string; status: MediaAsset["status"] },
+  ) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [draftFileName, setDraftFileName] = useState(asset.file_name);
   const [draftExpiresAt, setDraftExpiresAt] = useState(formatDateInputValue(asset.expires_at));
   const [draftTags, setDraftTags] = useState(asset.tags.join(", "));
   const [draftStatus, setDraftStatus] = useState<MediaAsset["status"]>(asset.status);
 
   function cancelEdit() {
+    setDraftFileName(asset.file_name);
     setDraftExpiresAt(formatDateInputValue(asset.expires_at));
     setDraftTags(asset.tags.join(", "));
     setDraftStatus(asset.status);
@@ -556,13 +1043,29 @@ function MediaCard({ asset, onDelete, onUpdate }: {
   }
 
   async function saveEdit() {
-    await onUpdate(asset, { expires_at: draftExpiresAt, tags: draftTags, status: draftStatus });
+    await onUpdate(asset, {
+      file_name: draftFileName,
+      expires_at: draftExpiresAt,
+      tags: draftTags,
+      status: draftStatus,
+    });
     setIsEditing(false);
   }
 
+  const actions = getMediaCardActions(asset.status);
+
   return (
     <article className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div className="aspect-[4/3] bg-slate-100">
+      <div className="relative aspect-[4/3] bg-slate-100">
+        <label className="absolute left-2 top-2 z-10 grid size-8 place-items-center rounded-md bg-white/90 shadow-sm ring-1 ring-slate-200">
+          <span className="sr-only">Select {asset.file_name}</span>
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => onToggleSelection(asset.id)}
+            className="size-4 accent-teal-700"
+          />
+        </label>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={asset.file_url} alt={asset.file_name} className="h-full w-full object-cover" />
       </div>
@@ -582,6 +1085,11 @@ function MediaCard({ asset, onDelete, onUpdate }: {
         {isEditing ? (
           <div className="grid gap-3">
             <label className="grid gap-1 text-xs font-medium text-slate-600">
+              File name
+              <input className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                value={draftFileName} onChange={(e) => setDraftFileName(e.target.value)} />
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-slate-600">
               Tags
               <input className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 value={draftTags} onChange={(e) => setDraftTags(e.target.value)} />
@@ -589,7 +1097,8 @@ function MediaCard({ asset, onDelete, onUpdate }: {
             <label className="grid gap-1 text-xs font-medium text-slate-600">
               Expires
               <input className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                type="date" required value={draftExpiresAt} onChange={(e) => setDraftExpiresAt(e.target.value)} />
+                type="date" required min={EXPIRY_DATE_BOUNDS.min} max={EXPIRY_DATE_BOUNDS.max}
+                value={draftExpiresAt} onChange={(e) => setDraftExpiresAt(e.target.value)} />
             </label>
             <label className="grid gap-1 text-xs font-medium text-slate-600">
               Status
@@ -625,13 +1134,73 @@ function MediaCard({ asset, onDelete, onUpdate }: {
           <div className="grid grid-cols-2 gap-2">
             <button type="button" onClick={() => setIsEditing(true)}
               className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-teal-300 hover:bg-teal-50 hover:text-teal-800">Edit</button>
-            <button type="button" disabled={asset.status === "deleted"} onClick={() => onDelete(asset)}
-              className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50">Delete</button>
+            {actions.map((action) => (
+              <button
+                key={action.intent}
+                type="button"
+                onClick={() => handleCardAction(action, asset, onDelete, onRestore, onPermanentDelete)}
+                className={getMediaActionButtonClassName(action)}
+              >
+                {action.label}
+              </button>
+            ))}
           </div>
         )}
       </div>
     </article>
   );
+}
+
+function handleCardAction(
+  action: MediaCardAction,
+  asset: MediaAsset,
+  onDelete: (asset: MediaAsset) => void,
+  onRestore: (asset: MediaAsset) => void,
+  onPermanentDelete: (asset: MediaAsset) => void,
+) {
+  if (action.intent === "restore") {
+    onRestore(asset);
+    return;
+  }
+
+  if (action.intent === "permanentDelete") {
+    onPermanentDelete(asset);
+    return;
+  }
+
+  onDelete(asset);
+}
+
+function getMediaActionButtonClassName(action: MediaCardAction) {
+  if (action.intent === "restore") {
+    return "rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50";
+  }
+
+  if (action.intent === "permanentDelete") {
+    return "col-span-2 rounded-md border border-rose-200 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-50";
+  }
+
+  return "rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700";
+}
+
+function getBulkConfirmTitle(action: BulkConfirmAction) {
+  if (action === "restore") return "Restore selected media?";
+  if (action === "permanentDelete") return "Permanently delete selected media?";
+  return "Delete selected media?";
+}
+
+function getBulkConfirmLabel(action: BulkConfirmAction) {
+  if (action === "restore") return "Restore";
+  if (action === "permanentDelete") return "Delete Forever";
+  return "Delete";
+}
+
+function getBulkConfirmDescription(action: BulkConfirmAction, selectedCount: number, selectedDeletedCount: number) {
+  if (action === "permanentDelete") {
+    return `${selectedDeletedCount} deleted media asset${selectedDeletedCount === 1 ? "" : "s"} will be removed from storage and cannot be restored.`;
+  }
+
+  return `${selectedCount} selected media asset${selectedCount === 1 ? "" : "s"} will be ${action === "delete" ? "marked deleted" : "restored to available"}.`;
 }
 
 function PaginationControls({ pagination, onPrevious, onNext }: {
@@ -666,6 +1235,11 @@ function formatDate(value: string) {
 
 function formatDateInputValue(value: string) {
   return new Date(value).toISOString().slice(0, 10);
+}
+
+function formatStatusFilterLabel(status: (typeof STATUS_OPTIONS)[number]) {
+  if (status === "expiring") return "expiring soon";
+  return status;
 }
 
 function statusClassName(status: MediaAsset["status"]) {

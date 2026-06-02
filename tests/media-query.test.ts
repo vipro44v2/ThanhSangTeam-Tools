@@ -19,6 +19,7 @@ test("parseMediaListParams clamps invalid page and limit values", () => {
       search: undefined,
       status: undefined,
       tag: undefined,
+      expiringSoon: false,
     },
   );
 });
@@ -39,6 +40,24 @@ test("parseMediaListParams keeps valid filters", () => {
       search: "quote",
       status: "available",
       tag: "night shift",
+      expiringSoon: false,
+    },
+  );
+});
+
+test("parseMediaListParams treats expiring as a virtual status filter", () => {
+  assert.deepEqual(
+    parseMediaListParams({
+      status: "expiring",
+    }),
+    {
+      page: 1,
+      limit: 24,
+      skip: 0,
+      search: undefined,
+      status: undefined,
+      tag: undefined,
+      expiringSoon: true,
     },
   );
 });

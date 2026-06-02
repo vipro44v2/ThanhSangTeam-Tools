@@ -21,6 +21,7 @@ export type MediaListParams = {
   search?: string;
   status?: MediaStatus;
   tag?: string;
+  expiringSoon: boolean;
 };
 
 export function parseMediaListParams(input: MediaListParamsInput): MediaListParams {
@@ -29,6 +30,7 @@ export function parseMediaListParams(input: MediaListParamsInput): MediaListPara
   const search = normalizeOptionalText(input.search);
   const tag = normalizeOptionalText(input.tag)?.toLowerCase();
   const status = parseMediaStatus(input.status);
+  const expiringSoon = input.status === "expiring";
 
   return {
     page,
@@ -37,6 +39,7 @@ export function parseMediaListParams(input: MediaListParamsInput): MediaListPara
     search,
     status: status ?? undefined,
     tag,
+    expiringSoon,
   };
 }
 
