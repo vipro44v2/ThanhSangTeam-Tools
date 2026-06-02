@@ -86,7 +86,11 @@
     ".next-dev-1780282413645/types/**/*.ts",
     ".next-dev-1780282413645/dev/types/**/*.ts",
     ".next-dev-1780296740641/types/**/*.ts",
-    ".next-dev-1780296740641/dev/types/**/*.ts"
+    ".next-dev-1780296740641/dev/types/**/*.ts",
+    ".next-dev-1780386063294/types/**/*.ts",
+    ".next-dev-1780386063294/dev/types/**/*.ts",
+    ".next-dev-1780386391911/types/**/*.ts",
+    ".next-dev-1780386391911/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
