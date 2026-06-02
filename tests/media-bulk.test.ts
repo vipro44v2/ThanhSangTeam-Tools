@@ -10,13 +10,13 @@ test("parseBulkMediaUpdateInput accepts status, expiry, and replace tags", () =>
   assert.deepEqual(
     parseBulkMediaUpdateInput({
       status: "available",
-      expires_at: "2026-05-31",
+      expires_at: "2026-07-01",
       tags: "Night Shift, ICU",
       tagsMode: "replace",
     }),
     {
       status: "available",
-      expires_at: new Date("2026-05-31T00:00:00.000Z"),
+      expires_at: new Date("2026-07-01T00:00:00.000Z"),
       tags: ["night shift", "icu"],
       tagsMode: "replace",
     },
