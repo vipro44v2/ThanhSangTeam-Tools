@@ -7,6 +7,7 @@ import {
   parseBulkMediaUpdateInput,
   type BulkMediaUpdateInput,
 } from "@/lib/media/bulk";
+import { partitionExpiredMediaAssetsForCleanup } from "@/lib/media/cleanup";
 import { readImageDimensions } from "@/lib/media/image-dimensions";
 import { deleteMediaFile, saveMediaFile } from "@/lib/media/local-storage";
 import { MediaListParams, parseMediaStatus } from "@/lib/media/query";
@@ -225,6 +226,11 @@ export async function cleanupExpiredMediaAssets(now = new Date()) {
     select: {
       id: true,
       storage_key: true,
+      _count: {
+        select: {
+          post_job_media: true,
+        },
+      },
     },
   });
 
@@ -232,14 +238,33 @@ export async function cleanupExpiredMediaAssets(now = new Date()) {
     return { deleted: 0 };
   }
 
-  for (const asset of expiredAssets) {
+  const { deletableAssets, retainedIds } = partitionExpiredMediaAssetsForCleanup(expiredAssets);
+
+  if (retainedIds.length > 0) {
+    await prisma.media_assets.updateMany({
+      where: {
+        id: {
+          in: retainedIds,
+        },
+      },
+      data: {
+        status: MediaStatus.expired,
+      },
+    });
+  }
+
+  if (deletableAssets.length === 0) {
+    return { deleted: 0 };
+  }
+
+  for (const asset of deletableAssets) {
     await deleteMediaFile(asset.storage_key);
   }
 
   const result = await prisma.media_assets.deleteMany({
     where: {
       id: {
-        in: expiredAssets.map((asset) => asset.id),
+        in: deletableAssets.map((asset) => asset.id),
       },
     },
   });
